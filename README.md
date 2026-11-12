@@ -97,15 +97,15 @@ Para remover a parte AWS: `bash poc.sh destruir`.
 | `rulebooks/servicenow-glue-polling.yml` | Alternativa sem webhook: o EDA consulta a ServiceNow (só conexões de saída) |
 | `rulebooks/servicenow-glue-aap.yml` | Variante para o AAP 2.5 |
 | `restart_glue_job.yml` | O playbook de restart |
-| `vars/contas.yml` | Catálogo de contas: papel a assumir, ExternalId, regiões, critério de elegibilidade e limite de restarts por conta |
+| `vars/vars.yml` | Variáveis do playbook: papel a assumir, ExternalId, regiões aceitas, critério de elegibilidade e limite de restarts |
 | `library/glue_job_run.py` | Módulo local: iniciar, parar, listar, aguardar e contar execuções do Glue, e ler as tags do job |
 | `simular_travamento.yml` | Arma o travamento e inicia o job |
 | `poc.sh` | Atalhos de todos os passos |
 
 ## Guarda-corpos
 
-- **Catálogo de contas** (`vars/contas.yml`): o Ansible só age em conta, região e job que passem pelas regras do catálogo (tag no job ou lista de jobs), venha o que vier no incidente. Fora delas, anota o motivo no incidente e não mexe no Glue. Conta com o catálogo incompleto (sem papel, sem critério de elegibilidade ou com o critério escrito errado) também é recusada.
-- **Papel de automação com menor privilégio:** o Ansible não usa a credencial base direto no Glue; assume o papel `poc-glue-sn-automacao` (com ExternalId), que só alcança os jobs do POC. Iniciar e parar execuções só é permitido pelo IAM em job com a tag `auto-remediacao=sim`, independentemente do catálogo. A credencial temporária não aparece no log do job.
+- **Onde a automação age** (`vars/vars.yml`): a conta e a região vêm do incidente, sem lista de contas. O que limita é o papel de automação, que precisa existir na conta e confiar no AAP, e o critério de elegibilidade do job (tag ou lista de jobs). Fora disso, o Ansible anota o motivo no incidente e não mexe no Glue. Variável de elegibilidade vazia ou escrita errado recusa, em vez de liberar todos os jobs.
+- **Papel de automação com menor privilégio:** o Ansible não usa a credencial base direto no Glue; assume o papel `poc-glue-sn-automacao` (com ExternalId), que só alcança os jobs do POC. Iniciar e parar execuções só é permitido pelo IAM em job com a tag `auto-remediacao=sim`, independentemente das variáveis do playbook. A credencial temporária não aparece no log do job.
 - **Só dois campos do incidente chegam ao playbook:** o rulebook passa o número e o `correlation_id`, e descarta o evento se algum deles tiver chaves (`{` ou `}`) ou se o número fugir do padrão. Sem isso, uma expressão Jinja escrita num campo do incidente seria avaliada pelo Ansible no modo de linha de comando.
 - **Limite de restarts:** no máximo 3 por job na última hora (`max_restarts` e `janela_restarts_horas`). Se o restart travar de novo, o novo incidente recebe uma nota de escalação e nada é reiniciado.
 - **Incidente duplicado:** o EventBridge reenvia o evento quando a ServiceNow demora mais de 5 s para responder, o que abre um segundo incidente igual. A business rule fecha o repetido como *Duplicate*, vinculado ao original, sem chamar o EDA. Repetido é sempre o incidente criado depois (no empate de segundo, o de maior número): mesmo que as regras dos dois rodem juntas, o mais antigo segue para o EDA. O playbook tem uma segunda proteção: se o job já foi reiniciado depois daquela execução travada, só resolve como duplicado.
@@ -188,30 +188,29 @@ Depois, grave a URL na ServiceNow com `bash poc.sh url-aap https://<nome>.tryclo
 O playbook não depende de conta nem de região fixas: tudo vem do incidente.
 
 - **`correlation_id = <conta>|<região>|<job>|<execução>`**: a regra do EventBridge monta esse valor com os campos `account` e `region` do próprio evento do Glue. Se outra integração abrir o incidente, ela precisa preencher o campo no mesmo formato.
-- **Catálogo de contas** (`vars/contas.yml`): para cada conta, o papel a assumir, o ExternalId, as regiões liberadas, o critério de elegibilidade (`tag` ou `lista`) e, se quiser, um `max_restarts` próprio. Conta nova = uma entrada no catálogo e o papel criado na conta.
-- **Assume role:** o Ansible se autentica com a credencial base (no AAP, a credencial "POC AWS") e assume `arn:aws:iam::<conta>:role/<papel_automacao>` em cada execução. Todas as chamadas ao Glue usam a credencial temporária (`module_defaults`).
-- **Elegibilidade por tag:** com `elegibilidade: tag`, o job precisa ter a tag `auto-remediacao=sim` (configurável por conta). Com `lista`, precisa estar em `jobs_permitidos` da conta.
+- **Sem catálogo de contas:** o incidente pode vir de qualquer conta. O papel a assumir tem o mesmo nome em todas (`aws_papel_automacao`, em `vars/vars.yml`), com o ExternalId de `aws_external_id`. Conta nova = criar o papel nela; nada muda no repositório. `aws_regioes_permitidas` restringe as regiões, se preenchida.
+- **Assume role:** o Ansible se autentica com a credencial base (no AAP, a credencial "POC AWS") e assume `arn:aws:iam::<conta>:role/<aws_papel_automacao>` em cada execução. Todas as chamadas ao Glue usam a credencial temporária (`module_defaults`).
+- **Elegibilidade:** com `job_elegibilidade: tag`, o job precisa ter a tag `auto-remediacao=sim` (`job_tag_chave` e `job_tag_valor`). Com `lista`, precisa estar em `jobs_permitidos`. Com `todos`, vale qualquer job que o papel alcance.
 
 Quando o incidente não passa nas regras, o Ansible anota o motivo no incidente ("A automação não atuou: ...") e para, sem chamar o Glue:
 
 | Situação | Motivo anotado |
 |---|---|
 | `correlation_id` em outro formato | fora do formato conta\|região\|job\|execução |
-| Conta fora do catálogo | a conta não está no catálogo de contas da automação |
-| Região não liberada para a conta | a região não está liberada para a conta |
+| Conta ou região fora do padrão | a conta não é um ID de conta AWS válido / a região não é uma região AWS válida |
+| Região fora da lista (se preenchida) | a região não está em aws_regioes_permitidas |
+| Conta sem o papel de automação | não foi possível assumir o papel ... (AccessDenied) |
 | Job inexistente na conta e região | o job não existe na conta |
 | Job sem a tag (ou fora da lista) | o job não tem a tag / não está na lista de jobs permitidos |
 | Execução inexistente no job | a execução não foi encontrada no job |
 | Execução que não travou | a execução está em (estado), e não em TIMEOUT |
 | Execução mais nova em andamento | o job já tem execução mais nova em andamento; nada foi parado nem reiniciado |
 
-Quando o papel não pode ser assumido (conta nova sem o papel, ExternalId diferente do catálogo), o motivo também vai para o incidente: "não foi possível assumir o papel ... (AccessDenied)".
-
 **Limite de 100 caracteres:** o `correlation_id` da ServiceNow guarda no máximo 100 caracteres. Conta (12) + região + job + ID da execução (67) passa disso, e a ServiceNow corta o fim do ID da execução. O módulo `glue_job_run` aceita o ID cortado: procura a execução que começa com aquele prefixo e só segue se houver exatamente uma. Com nomes de job longos, vale confirmar quanto sobra do ID (ou usar um campo próprio para a execução).
 
-Validado no laboratório (04/11/2026): os seis motivos de recusa acima e o papel não assumido, pela CLI; e, pelo AAP (EE com ansible-core 2.16), o restart de ponta a ponta com o ID cortado (INC0010016, resolvido em 106 s) e o incidente duplicado da mesma execução, resolvido como *Duplicate* sem novo restart.
+Validado no laboratório (04/11/2026), ainda com o catálogo de contas: os motivos de recusa e o papel não assumido, pela CLI; e, pelo AAP (EE com ansible-core 2.16), o restart de ponta a ponta com o ID cortado (INC0010016, resolvido em 106 s) e o incidente duplicado da mesma execução, resolvido como *Duplicate* sem novo restart.
 
-Validado de novo em 12/11/2026, com a stack, a ServiceNow e o AAP na versão atual:
+Validado de novo em 12/11/2026, com a stack, a ServiceNow e o AAP atualizados (o catálogo de contas ainda existia):
 
 - **Fluxo principal:** job travado (TIMEOUT aos 130 s) → o EventBridge abriu o INC0010019 → o EDA lançou o job template → restart pelo papel de automação (SUCCEEDED em 72 s) → incidente resolvido. O job do AAP levou 99 s, e a credencial temporária não apareceu no log.
 - **Recusas pelo AAP**, anotadas no incidente de teste: formato do `correlation_id`, conta fora do catálogo, região não liberada, job inexistente, execução inexistente e execução que não travou. O evento repetido de uma execução já reiniciada fechou o incidente como *Duplicate*, sem novo restart.

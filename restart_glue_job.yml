@@ -1,7 +1,7 @@
 ---
 # Acionado pelo EDA quando a ServiceNow avisa que um job Glue travou.
-# Confere conta, região e job no catálogo (vars/contas.yml), assume o papel de automação
-# na conta do job, confere que a execução do incidente travou de fato, reinicia o job
+# Lê conta, região, job e execução do incidente, assume o papel de automação na conta do job
+# (o mesmo papel em qualquer conta), confere que o job pode ser reiniciado (vars/vars.yml), confere que a execução do incidente travou de fato, reinicia o job
 # e resolve o incidente com o resultado. Não para nem reinicia nada além dessa execução,
 # e qualquer falha no caminho fica anotada no incidente.
 - name: Reiniciar job Glue travado
@@ -10,7 +10,6 @@
   gather_facts: false
   vars_files:
     - vars/vars.yml
-    - vars/contas.yml
   vars:
     # O rulebook passa só incidente_numero e correlation_id, já conferidos na condição da regra
     # (dá para lançar o job à mão com as duas variáveis). O playbook não lê o evento bruto:
@@ -24,9 +23,6 @@
     regiao: "{{ partes[1] | default('') }}"
     job_name: "{{ partes[2] | default('') }}"
     run_travado: "{{ partes[3] | default('') }}"
-    conta: "{{ contas[conta_id] | default({}) }}"
-    limite_restarts: "{{ conta.max_restarts | default(max_restarts) }}"
-    espera_restart: "{{ conta.espera_restart_segundos | default(espera_restart_segundos) }}"
     sn_instancia:
       host: "{{ sn_host }}"
       username: "{{ sn_integracao_usuario }}"
@@ -52,7 +48,7 @@
         fail_msg: "Número de incidente ausente ou fora do padrão: nada foi feito."
         quiet: true
 
-    - name: Conferir o incidente contra o catálogo de contas
+    - name: Conferir os dados do incidente
       ansible.builtin.set_fact:
         motivo_recusa: "{{ verificacoes | selectattr('falhou') | map(attribute='motivo') | first | default('') }}"
       vars:
@@ -60,29 +56,31 @@
           # As quatro partes são obrigatórias: sem a execução, não há como conferir o travamento
           - falhou: "{{ partes | length != 4 or partes | map('trim') | select | list | length != 4 }}"
             motivo: "correlation_id fora do formato conta|região|job|execução ({{ incidente.correlation_id | default('vazio', true) }})"
-          - falhou: "{{ conta_id not in contas }}"
-            motivo: "a conta {{ conta_id }} não está no catálogo de contas da automação"
-          - falhou: "{{ regiao not in conta.regioes | default([]) }}"
-            motivo: "a região {{ regiao }} não está liberada para a conta {{ conta_id }}"
-          # Catálogo incompleto ou com erro de digitação recusa, em vez de liberar todos os jobs da conta
-          - falhou: "{{ conta.papel_automacao | default('') | length == 0 }}"
-            motivo: "a conta {{ conta_id }} está no catálogo sem papel_automacao"
-          - falhou: "{{ conta.elegibilidade | default('') not in ['tag', 'lista'] }}"
-            motivo: "a conta {{ conta_id }} está no catálogo sem um critério de elegibilidade válido (tag ou lista)"
+          - falhou: "{{ conta_id is not match('^[0-9]{12}$') }}"
+            motivo: "a conta {{ conta_id }} não é um ID de conta AWS válido"
+          - falhou: "{{ regiao is not match('^[a-z]{2}(-[a-z]+)+-[0-9]$') }}"
+            motivo: "a região {{ regiao }} não é uma região AWS válida"
+          - falhou: "{{ aws_regioes_permitidas | default([], true) | length > 0 and regiao not in aws_regioes_permitidas }}"
+            motivo: "a região {{ regiao }} não está em aws_regioes_permitidas"
+          # Variável sem preencher ou com erro de digitação recusa, em vez de liberar todos os jobs
+          - falhou: "{{ aws_papel_automacao | default('', true) | length == 0 }}"
+            motivo: "o papel de automação (aws_papel_automacao) não está preenchido nas variáveis"
+          - falhou: "{{ job_elegibilidade | default('') not in ['tag', 'lista', 'todos'] }}"
+            motivo: "job_elegibilidade precisa ser tag, lista ou todos"
           - falhou: >-
-              {{ conta.elegibilidade | default('') == 'tag' and
-                 (conta.tag_chave | default('') | string | length == 0 or conta.tag_valor | default('') | string | length == 0) }}
-            motivo: "a conta {{ conta_id }} usa elegibilidade por tag, mas está no catálogo sem tag_chave ou tag_valor"
-          - falhou: "{{ conta.elegibilidade | default('') == 'lista' and job_name not in conta.jobs_permitidos | default([]) }}"
-            motivo: "o job {{ job_name }} não está na lista de jobs permitidos da conta {{ conta_id }}"
+              {{ job_elegibilidade | default('') == 'tag' and
+                 (job_tag_chave | default('', true) | string | length == 0 or job_tag_valor | default('', true) | string | length == 0) }}
+            motivo: "a elegibilidade é por tag, mas job_tag_chave ou job_tag_valor está vazio"
+          - falhou: "{{ job_elegibilidade | default('') == 'lista' and job_name not in jobs_permitidos | default([], true) }}"
+            motivo: "o job {{ job_name }} não está em jobs_permitidos"
 
     - name: Tratar o incidente
       block:
         - name: Assumir o papel de automação na conta do job
           amazon.aws.sts_assume_role:
-            role_arn: "arn:aws:iam::{{ conta_id }}:role/{{ conta.papel_automacao }}"
+            role_arn: "arn:aws:iam::{{ conta_id }}:role/{{ aws_papel_automacao }}"
             role_session_name: "aap-{{ incidente.number }}"
-            external_id: "{{ conta.external_id | default(omit) }}"
+            external_id: "{{ aws_external_id | default(omit, true) }}"
             duration_seconds: 3600
             region: "{{ regiao }}"
           register: sessao
@@ -90,11 +88,11 @@
           no_log: true     # o resultado traz a credencial temporária; sem isto ela ficaria no log do job
           when: motivo_recusa | length == 0
 
-        # Ex.: conta nova em que o papel ainda não foi criado, ou ExternalId diferente do catálogo
+        # Ex.: conta em que o papel ainda não foi criado, ou que não confia na identidade do AAP
         - name: Conferir se o papel foi assumido
           ansible.builtin.set_fact:
             motivo_recusa: >-
-              não foi possível assumir o papel {{ conta.papel_automacao }} na conta {{ conta_id }}
+              não foi possível assumir o papel {{ aws_papel_automacao }} na conta {{ conta_id }}
               ({{ sessao.error.code | default(sessao.msg | default('erro desconhecido')) }})
           when: sessao is not skipped and sessao.sts_creds is not defined
 
@@ -103,16 +101,16 @@
             action: tags
             job_name: "{{ job_name }}"
           register: tags_job
-          when: motivo_recusa | length == 0 and conta.elegibilidade | default('') == 'tag'
+          when: motivo_recusa | length == 0 and job_elegibilidade == 'tag'
 
         - name: Conferir a tag de auto-remediação
           ansible.builtin.set_fact:
             motivo_recusa: >-
               {{ 'o job ' ~ job_name ~ ' não existe na conta ' ~ conta_id ~ ', região ' ~ regiao if not tags_job.encontrado
-                 else 'o job ' ~ job_name ~ ' não tem a tag ' ~ conta.tag_chave ~ '=' ~ conta.tag_valor }}
+                 else 'o job ' ~ job_name ~ ' não tem a tag ' ~ job_tag_chave ~ '=' ~ job_tag_valor }}
           when:
             - tags_job is not skipped
-            - not tags_job.encontrado or tags_job.tags[conta.tag_chave] | default('') != conta.tag_valor
+            - not tags_job.encontrado or tags_job.tags[job_tag_chave] | default('') != job_tag_valor
 
         # O incidente só vale se a execução que ele cita existir e tiver travado (glue_estados_travado).
         # Um incidente com dados inventados ou de uma execução saudável não mexe no Glue.
@@ -204,7 +202,7 @@
           register: restarts
 
         - name: Escalar se o job já foi reiniciado demais
-          when: restarts.count | int >= limite_restarts | int
+          when: restarts.count | int >= max_restarts | int
           block:
             - name: Anotar no incidente
               servicenow.itsm.incident:
@@ -212,7 +210,7 @@
                 number: "{{ incidente.number }}"
                 other:
                   work_notes: >-
-                    O job já foi reiniciado {{ restarts.count }} vezes na última {{ janela_restarts_horas }} h (limite {{ limite_restarts }}).
+                    O job já foi reiniciado {{ restarts.count }} vezes na última {{ janela_restarts_horas }} h (limite {{ max_restarts }}).
                     A automação não vai reiniciar de novo: encaminhar para a sustentação.
 
             - name: Interromper
@@ -261,7 +259,7 @@
             action: wait
             job_name: "{{ job_name }}"
             run_id: "{{ novo.run_id }}"
-            timeout: "{{ espera_restart }}"
+            timeout: "{{ espera_restart_segundos }}"
           register: final
           failed_when: final.job_run is not defined
 
@@ -290,7 +288,7 @@
                   work_notes: >-
                     {{ 'O restart (execução ' ~ novo.run_id ~ ') terminou em ' ~ estado ~ ': ' ~ final.job_run.ErrorMessage | default('sem mensagem')
                        if terminou | bool
-                       else 'O restart (execução ' ~ novo.run_id ~ ') ainda está em ' ~ estado ~ ' depois de ' ~ espera_restart ~ ' s de espera' }}.
+                       else 'O restart (execução ' ~ novo.run_id ~ ') ainda está em ' ~ estado ~ ' depois de ' ~ espera_restart_segundos ~ ' s de espera' }}.
                     Encaminhar para a sustentação.
 
             - name: Interromper

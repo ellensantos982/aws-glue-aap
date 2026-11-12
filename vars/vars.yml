@@ -4,17 +4,28 @@ prefixo: poc-glue-sn
 stack: "{{ prefixo }}"
 glue_job: "{{ prefixo }}-carga-diaria"
 
-# Contas, regiões e jobs em que o Ansible pode agir: vars/contas.yml
+# A conta e a região vêm do incidente (correlation_id). O Ansible assume este papel na conta do job:
+# ele precisa existir com o mesmo nome em cada conta e confiar na identidade que o AAP usa na AWS.
+aws_papel_automacao: "{{ prefixo }}-automacao"   # criado pela stack do POC
+aws_external_id: "{{ prefixo }}-aap"             # vazio se o papel não exigir ExternalId
+aws_regioes_permitidas: []                       # vazio = qualquer região; ou, por exemplo, [us-east-1]
+
+# Quais jobs podem ser reiniciados:
+#   tag   -> só jobs com a tag job_tag_chave=job_tag_valor
+#   lista -> só os jobs de jobs_permitidos
+#   todos -> qualquer job que o papel alcance (a única barreira passa a ser a permissão do papel)
+job_elegibilidade: tag
+job_tag_chave: auto-remediacao
+job_tag_valor: sim
+jobs_permitidos: []
 
 # Evita loop (restart que trava de novo abre outro incidente): no máximo N restarts por job na janela
-# (padrão; cada conta pode ter o seu em vars/contas.yml)
 max_restarts: 3
 janela_restarts_horas: 1
 
 # O incidente só é tratado se a execução que ele cita estiver num destes estados
 glue_estados_travado: [TIMEOUT]
 # Quanto esperar o restart terminar antes de devolver o incidente com a execução ainda em andamento
-# (padrão; cada conta pode ter o seu em vars/contas.yml, em espera_restart_segundos)
 espera_restart_segundos: 900
 
 # ServiceNow

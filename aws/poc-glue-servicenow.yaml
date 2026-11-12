@@ -103,7 +103,7 @@ Resources:
         "--bucket": !Ref Bucket
         "--job-language": python
       Tags:
-        auto-remediacao: sim     # o Ansible só reinicia jobs com esta tag (vars/contas.yml)
+        auto-remediacao: sim     # o Ansible só reinicia jobs com esta tag (vars/vars.yml)
 
   # ---------- Papel que o Ansible assume para tratar os jobs ----------
   # Com várias contas, um papel destes em cada uma, confiando no principal do AAP
