@@ -160,6 +160,7 @@ Os arquivos desta pasta rodaram no AAP 2.7 do laboratório, neste mesmo layout, 
   - evento de uma execução já reiniciada fechou o incidente como duplicado;
   - com três restarts na última hora, o quarto foi recusado com a nota do limite.
 - **Caminho principal**, com o job template lançado à mão e a variável `evento`: o job assumiu o incidente, reiniciou um job travado de verdade e resolveu o incidente. A credencial temporária não apareceu no log.
+- **Duas activations no mesmo Event Stream:** uma activation com o `glue-eventos-observar.yml` foi ligada ao Event Stream que outra activation já lia. Um único evento disparou as duas: a primeira lançou o job dela e a de leitura mostrou o evento inteiro no log, sem a credencial do controller. O cabeçalho de autenticação não aparece no log.
 - **Pela linha de comando**, onze cenários contra a AWS e a ServiceNow do laboratório: campos do evento com outros nomes, incidente por `sys_id`, elegibilidade por lista e `todos`, conta sem o papel, região fora da lista, job e execução inexistentes, execução que não travou, papel não preenchido, evento sem o incidente e evento em estado não tratado.
 
 Não foi conferido:
