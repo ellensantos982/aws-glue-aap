@@ -1,21 +1,53 @@
 ---
-# Variáveis do restart_glue_job.yml. Contas, regiões e jobs em que o Ansible pode agir: vars/contas.yml
+# Variáveis do restart_glue_job.yml. Tudo o que depende do ambiente fica neste arquivo:
+# para ajustar, basta alterar aqui e dar push (o AAP atualiza o projeto ao lançar o job).
 
-# Evita loop (restart que trava de novo abre outro incidente): no máximo N restarts por job na janela
-# (padrão; cada conta pode ter o seu em vars/contas.yml)
+# ---------- Evento ----------
+# Nome, no evento, de cada campo que o playbook usa. Se o evento trouxer o dado num campo
+# com outro nome, troque só o lado direito.
+evento_campos:
+  incidente: number        # AJUSTAR: campo que traz o incidente (o exemplo de evento não traz)
+  conta: account
+  regiao: region
+  job: jobName
+  execucao: jobRunId
+  estado: jobState
+# O que o campo do incidente traz: numero (ex.: INC0012345) ou sys_id (32 caracteres hexadecimais)
+evento_incidente_tipo: numero
+
+# Estados que a automação trata. Evento com outro estado termina sem tocar no incidente.
+# A execução também é conferida no Glue: só é reiniciada se estiver mesmo num destes estados.
+glue_estados_travado: [TIMEOUT]
+
+# ---------- AWS ----------
+# A conta e a região vêm do evento. O Ansible assume este papel na conta do job: ele precisa
+# existir com o mesmo nome em cada conta e confiar na identidade que o AAP usa na AWS.
+aws_papel_automacao: AJUSTAR-nome-do-papel
+aws_external_id: ""            # só se o papel exigir ExternalId
+aws_regioes_permitidas: []     # vazio = qualquer região; ou, por exemplo, [sa-east-1, us-east-1]
+
+# Quais jobs podem ser reiniciados:
+#   tag   -> só jobs com a tag job_tag_chave=job_tag_valor
+#   lista -> só os jobs de jobs_permitidos
+#   todos -> qualquer job que o papel alcance (a única barreira passa a ser a permissão do papel)
+job_elegibilidade: tag
+job_tag_chave: auto-remediacao
+job_tag_valor: sim
+jobs_permitidos: []
+
+# Evita loop (restart que trava de novo gera outro incidente): no máximo N restarts por job na janela
 max_restarts: 3
 janela_restarts_horas: 1
-
-# O incidente só é tratado se a execução que ele cita estiver num destes estados.
-# AJUSTAR junto com a condição do rulebook (jobState): os dois precisam aceitar os mesmos estados.
-glue_estados_travado: [TIMEOUT]
 # Quanto esperar o restart terminar antes de devolver o incidente com a execução ainda em andamento
-# (padrão; cada conta pode ter o seu em vars/contas.yml, em espera_restart_segundos)
 espera_restart_segundos: 900
 
-# ServiceNow: SN_HOST e SN_INTEGRACAO_SENHA vêm do ambiente (credencial do AAP que injeta as duas)
+# ---------- ServiceNow ----------
+# Endereço, usuário e senha vêm de variáveis de ambiente, injetadas pela credencial do AAP.
+# Os nomes abaixo são os que a coleção servicenow.itsm usa por padrão; se a credencial do
+# ambiente injetar outros nomes, troque aqui. Para fixar o usuário, escreva o nome no lugar do lookup.
 sn_host: "{{ lookup('ansible.builtin.env', 'SN_HOST') | regex_replace('/$', '') }}"
-sn_integracao_usuario: AJUSTAR-usuario-de-integracao
+sn_integracao_usuario: "{{ lookup('ansible.builtin.env', 'SN_USERNAME') }}"
+sn_integracao_senha: "{{ lookup('ansible.builtin.env', 'SN_PASSWORD') }}"
 
 # Códigos de resolução: precisam existir na instância
 sn_close_code: Solved (Permanently)
