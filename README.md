@@ -284,3 +284,8 @@ Depois disso, o POC rodou contra a ServiceNow e a AWS reais, primeiro em linha d
 A pasta `para-copiar/` traz o playbook, o módulo e o rulebook no layout de um repositório de automação
 (`playbooks/`, `plugins/modules/`, `rulebooks/`), com o rulebook lendo o evento de um monitoramento de jobs
 em vez do incidente da ServiceNow. Comece pelo `para-copiar/_LEIA-ME.md`.
+
+## Baixar sem git clone
+
+Onde o `git clone` e o download do zip não passam, o `_baixar-pelo-console.js` baixa os arquivos pelo console
+do navegador. Os `.sh` e `.py` vão em texto, no `_scripts-em-texto.md`, e são remontados pelo próprio script.
