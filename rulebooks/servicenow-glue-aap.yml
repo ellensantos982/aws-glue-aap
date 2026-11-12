@@ -1,0 +1,27 @@
+---
+# Modo AAP: rulebook activation ligada ao Event Stream "poc-servicenow-glue" (token da ServiceNow).
+# O rulebook escolhe o job template e passa só os campos que ele precisa em job_args.extra_vars;
+# o playbook não depende do formato do evento.
+- name: ServiceNow -> EDA -> restart de job Glue
+  hosts: all
+  sources:
+    - ansible.eda.webhook:
+        host: 0.0.0.0
+        port: 5000
+
+  rules:
+    - name: Incidente de job Glue travado
+      condition: >-
+        event.payload.correlation_id is defined and
+        event.payload.correlation_id is not search("[{}]") and
+        event.payload.number is not search("[{}]") and
+        event.payload.number is match("[A-Z]+[0-9]+$") and
+        event.payload.short_description is search("AWS Glue", ignorecase=true)
+      action:
+        run_job_template:
+          organization: "Default"
+          name: "poc-restart-glue-job"
+          job_args:
+            extra_vars:
+              incidente_numero: "{{ event.payload.number }}"
+              correlation_id: "{{ event.payload.correlation_id }}"

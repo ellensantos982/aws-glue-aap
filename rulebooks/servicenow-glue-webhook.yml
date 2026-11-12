@@ -1,0 +1,27 @@
+---
+# Modo CLI (ansible-core + ansible-rulebook): a business rule da ServiceNow chama este webhook.
+#   ./poc.sh eda      (equivale a: ansible-rulebook --rulebook rulebooks/servicenow-glue-webhook.yml
+#                      -i inventory.yml --env-vars EDA_TOKEN --verbose)
+- name: ServiceNow -> EDA -> restart de job Glue
+  hosts: localhost
+  sources:
+    - ansible.eda.webhook:
+        host: 0.0.0.0
+        port: 5000
+        token: "{{ EDA_TOKEN }}"     # a ServiceNow manda Authorization: Bearer <token>
+  rules:
+    - name: Incidente de job Glue travado
+      # Número e correlation_id viram variáveis do playbook, e o Ansible avalia expressões Jinja em
+      # variáveis recebidas assim: valor com chaves é descartado aqui, antes de chegar ao playbook.
+      condition: >-
+        event.payload.correlation_id is defined and
+        event.payload.correlation_id is not search("[{}]") and
+        event.payload.number is not search("[{}]") and
+        event.payload.number is match("[A-Z]+[0-9]+$") and
+        event.payload.short_description is search("AWS Glue", ignorecase=true)
+      action:
+        run_playbook:
+          name: restart_glue_job.yml
+          extra_vars:
+            incidente_numero: "{{ event.payload.number }}"
+            correlation_id: "{{ event.payload.correlation_id }}"

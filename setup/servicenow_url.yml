@@ -1,0 +1,78 @@
+---
+# Aponta a business rule para o webhook do EDA: grava a URL e o token nas propriedades
+# poc.eda.webhook_url e poc.eda.token. Usa o usuário de integração (as propriedades têm
+# write_roles=poc_eda, papel só dele), então não precisa da senha do admin. Antes de gravar, confere que a
+# URL recusa um token errado (401 no ansible-rulebook, 403 no AAP): URL errada não é gravada.
+#   bash poc.sh url https://xxxx.trycloudflare.com       (ansible-rulebook local)
+#   bash poc.sh url-aap https://xxxx.trycloudflare.com   (Event Stream do AAP)
+- name: Atualizar o webhook do EDA na ServiceNow
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../vars/vars.yml
+  vars:
+    sn_instancia:
+      host: "{{ sn_host }}"
+      username: "{{ sn_integracao_usuario }}"
+      password: "{{ lookup('ansible.builtin.env', 'SN_INTEGRACAO_SENHA') }}"
+    eda_webhook_url: "{{ lookup('ansible.builtin.env', 'EDA_WEBHOOK_URL') }}"
+
+  tasks:
+    - name: Conferir parâmetros
+      ansible.builtin.assert:
+        that:
+          - eda_webhook_url is match('https://')
+          - lookup('ansible.builtin.env', 'EDA_TOKEN') | length > 0
+          - sn_instancia.password | length > 0
+        fail_msg: "Informe a URL (https://...) e preencha EDA_TOKEN e SN_INTEGRACAO_SENHA no .env"
+
+    - name: Testar a URL com um token errado
+      ansible.builtin.uri:
+        url: "{{ eda_webhook_url }}"
+        method: POST
+        headers:
+          Authorization: Bearer token-invalido
+        body_format: json
+        body: {}
+        status_code: [401, 403]
+        timeout: 30
+      register: teste_url
+      failed_when: false
+
+    - name: Conferir a resposta da URL
+      ansible.builtin.assert:
+        that:
+          - teste_url.status | default(0) | int in [401, 403]
+        fail_msg: >-
+          A URL respondeu {{ teste_url.status | default('sem resposta') }} (esperado 401 ou 403) e não foi gravada.
+          Para o AAP, use bash poc.sh url-aap, que acrescenta o caminho do Event Stream; para o ansible-rulebook
+          local, use bash poc.sh url. Confira também se o túnel está aberto.
+        success_msg: "URL ok: token errado recusado com {{ teste_url.status }}"
+
+    - name: Ler as propriedades do EDA
+      servicenow.itsm.api_info:
+        instance: "{{ sn_instancia }}"
+        resource: sys_properties
+        sysparm_query: nameSTARTSWITHpoc.eda.
+        columns: [sys_id, name]
+      register: propriedades
+
+    - name: Gravar URL e token
+      servicenow.itsm.api:
+        instance: "{{ sn_instancia }}"
+        resource: sys_properties
+        action: patch
+        sys_id: "{{ (propriedades.record | selectattr('name', 'equalto', item.nome) | first).sys_id }}"
+        data:
+          value: "{{ item.valor }}"
+      loop:
+        - {nome: poc.eda.webhook_url, valor: "{{ eda_webhook_url }}"}
+        - {nome: poc.eda.token, valor: "{{ lookup('ansible.builtin.env', 'EDA_TOKEN') }}"}
+      loop_control:
+        label: "{{ item.nome }}"
+      no_log: true
+
+    - name: Resumo
+      ansible.builtin.debug:
+        msg: "A business rule agora chama {{ eda_webhook_url }}"

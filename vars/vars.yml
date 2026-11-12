@@ -1,0 +1,29 @@
+---
+aws_region: "{{ lookup('ansible.builtin.env', 'AWS_REGION') | default('us-east-1', true) }}"
+prefixo: poc-glue-sn
+stack: "{{ prefixo }}"
+glue_job: "{{ prefixo }}-carga-diaria"
+
+# Contas, regiões e jobs em que o Ansible pode agir: vars/contas.yml
+
+# Evita loop (restart que trava de novo abre outro incidente): no máximo N restarts por job na janela
+# (padrão; cada conta pode ter o seu em vars/contas.yml)
+max_restarts: 3
+janela_restarts_horas: 1
+
+# O incidente só é tratado se a execução que ele cita estiver num destes estados
+glue_estados_travado: [TIMEOUT]
+# Quanto esperar o restart terminar antes de devolver o incidente com a execução ainda em andamento
+# (padrão; cada conta pode ter o seu em vars/contas.yml, em espera_restart_segundos)
+espera_restart_segundos: 900
+
+# ServiceNow
+sn_host: "{{ lookup('ansible.builtin.env', 'SN_HOST') | regex_replace('/$', '') }}"
+sn_integracao_usuario: poc.integracao.aws
+# Papel próprio que lê e grava as propriedades poc.eda.* (URL e token do webhook); só o usuário de integração o recebe
+sn_papel_eda: poc_eda
+# Código de resolução: precisa existir na instância (a PDI usada nos testes, release Brazil, não tem "Solution provided")
+sn_close_code: Workaround provided
+sn_close_code_duplicado: Duplicate
+
+eda_webhook_porta: 5000

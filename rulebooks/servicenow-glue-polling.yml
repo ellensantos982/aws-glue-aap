@@ -1,0 +1,30 @@
+---
+# Alternativa sem webhook: o EDA consulta a ServiceNow a cada 15 s (só conexões de saída).
+# Útil se a segurança não permitir que a ServiceNow alcance o EDA. Usa SN_HOST, SN_USERNAME e SN_PASSWORD.
+#   SN_USERNAME=poc.integracao.aws SN_PASSWORD=$SN_INTEGRACAO_SENHA \
+#   ansible-rulebook --rulebook rulebooks/servicenow-glue-polling.yml -i inventory.yml --verbose
+- name: ServiceNow (polling) -> EDA -> restart de job Glue
+  hosts: localhost
+  sources:
+    - servicenow.itsm.records:
+        table: incident
+        # só incidentes abertos pelo usuário de integração (mesma condição da business rule)
+        sysparm_query: correlation_display=aws-glue^active=true^sys_created_by=poc.integracao.aws
+        timestamp_field: sys_created_on   # só incidentes novos; atualizações feitas pelo Ansible não redisparam
+        remote_servicenow_timezone: UTC
+        interval: 15
+  rules:
+    - name: Incidente de job Glue travado
+      # Número e correlation_id viram variáveis do playbook, e o Ansible avalia expressões Jinja em
+      # variáveis recebidas assim: valor com chaves é descartado aqui, antes de chegar ao playbook.
+      condition: >-
+        event.correlation_id is defined and
+        event.correlation_id is not search("[{}]") and
+        event.number is not search("[{}]") and
+        event.number is match("[A-Z]+[0-9]+$")
+      action:
+        run_playbook:
+          name: restart_glue_job.yml
+          extra_vars:
+            incidente_numero: "{{ event.number }}"
+            correlation_id: "{{ event.correlation_id }}"

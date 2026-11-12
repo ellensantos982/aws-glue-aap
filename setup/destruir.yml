@@ -1,0 +1,58 @@
+---
+# Remove a parte AWS do POC (inclusive o bucket e o que estiver nele).
+# A configuração na ServiceNow fica; uma PDI pode ser resetada pelo portal de desenvolvedor.
+#   ./poc.sh destruir
+- name: Destruir a parte AWS do POC
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../vars/vars.yml
+
+  tasks:
+    - name: Exigir confirmação
+      ansible.builtin.assert:
+        that: confirmar | default('') == 'sim'
+        fail_msg: "Isto apaga a stack e o bucket do POC. Rode com -e confirmar=sim"
+
+    - name: Descobrir a conta AWS
+      amazon.aws.aws_caller_info:
+      register: conta
+
+    - name: Listar os objetos do bucket
+      amazon.aws.s3_object:
+        bucket: "{{ prefixo }}-{{ conta.account }}-{{ aws_region }}"
+        mode: list
+        region: "{{ aws_region }}"
+      register: objetos
+      failed_when: false
+
+    - name: Esvaziar o bucket (o CloudFormation não apaga bucket com conteúdo)
+      amazon.aws.s3_object:
+        bucket: "{{ prefixo }}-{{ conta.account }}-{{ aws_region }}"
+        object: "{{ item }}"
+        mode: delobj
+        region: "{{ aws_region }}"
+      loop: "{{ objetos.s3_keys | default([]) }}"
+
+    # O CloudFormation não apaga usuário IAM que ainda tenha chave de acesso
+    - name: Listar as chaves de acesso do usuário do AAP
+      amazon.aws.iam_access_key_info:
+        user_name: "{{ prefixo }}-aap"
+      register: chaves_aap
+      failed_when: false
+
+    - name: Apagar as chaves de acesso do usuário do AAP
+      amazon.aws.iam_access_key:
+        user_name: "{{ prefixo }}-aap"
+        id: "{{ item.access_key_id }}"
+        state: absent
+      loop: "{{ chaves_aap.access_keys | default([]) }}"
+      loop_control:
+        label: "{{ item.access_key_id }}"
+
+    - name: Apagar a stack
+      amazon.aws.cloudformation:
+        stack_name: "{{ stack }}"
+        state: absent
+        region: "{{ aws_region }}"

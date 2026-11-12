@@ -1,0 +1,191 @@
+---
+# Configura a instância de desenvolvimento (PDI) da ServiceNow para o POC:
+#   - usuário de integração (só web service) com os papéis itil e poc_eda
+#   - propriedades com a URL e o token do webhook do EDA, restritas ao papel poc_eda
+#   - business rule que chama o EDA quando o usuário de integração abre um incidente de job Glue
+#
+# Usa as credenciais de admin do .env (SN_HOST, SN_ADMIN_USER, SN_ADMIN_SENHA).
+#   ./poc.sh servicenow                      (tudo)
+#   ./poc.sh url https://xxxx.trycloudflare.com   (só troca a URL do webhook)
+- name: Configurar a ServiceNow
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../vars/vars.yml
+  vars:
+    sn_admin:
+      host: "{{ sn_host }}"
+      username: "{{ lookup('ansible.builtin.env', 'SN_ADMIN_USER') }}"
+      password: "{{ lookup('ansible.builtin.env', 'SN_ADMIN_SENHA') }}"
+    eda_webhook_url: "{{ lookup('ansible.builtin.env', 'EDA_WEBHOOK_URL') }}"
+    regra_nome: POC - Acionar EDA para job Glue travado
+
+  tasks:
+    - name: Conferir o .env
+      ansible.builtin.assert:
+        that:
+          - sn_host is match('https://')
+          - sn_admin.password | length > 0
+          - lookup('ansible.builtin.env', 'SN_INTEGRACAO_SENHA') | length >= 12
+          - lookup('ansible.builtin.env', 'EDA_TOKEN') | length > 0
+        fail_msg: "Preencha SN_HOST (com https://), SN_ADMIN_USER, SN_ADMIN_SENHA, SN_INTEGRACAO_SENHA (12+ caracteres) e EDA_TOKEN no .env"
+      tags: [always]
+
+    # ---------- usuário de integração ----------
+    - name: Procurar o usuário de integração
+      servicenow.itsm.api_info:
+        instance: "{{ sn_admin }}"
+        resource: sys_user
+        sysparm_query: "user_name={{ sn_integracao_usuario }}"
+        columns: [sys_id]
+      register: usuario
+
+    - name: Criar ou atualizar o usuário de integração
+      servicenow.itsm.api:
+        instance: "{{ sn_admin }}"
+        resource: sys_user
+        action: "{{ 'patch' if usuario.record else 'post' }}"
+        sys_id: "{{ usuario.record[0].sys_id if usuario.record else omit }}"
+        # necessário para a senha ser gravada com hash
+        query_params:
+          sysparm_input_display_value: "true"
+        data:
+          user_name: "{{ sn_integracao_usuario }}"
+          first_name: POC
+          last_name: Integração AWS e Ansible
+          user_password: "{{ lookup('ansible.builtin.env', 'SN_INTEGRACAO_SENHA') }}"
+          web_service_access_only: "true"
+          password_needs_reset: "false"
+          time_zone: UTC
+          active: "true"
+      register: usuario_gravado
+      no_log: true
+
+    # Papel próprio para as propriedades poc.eda.*: com o papel itil nelas, qualquer atendente
+    # leria o token do webhook ou trocaria a URL que a business rule chama.
+    - name: Procurar o papel das propriedades do EDA
+      servicenow.itsm.api_info:
+        instance: "{{ sn_admin }}"
+        resource: sys_user_role
+        sysparm_query: "name={{ sn_papel_eda }}"
+        columns: [sys_id]
+      register: papel_eda
+
+    - name: Criar o papel das propriedades do EDA
+      servicenow.itsm.api:
+        instance: "{{ sn_admin }}"
+        resource: sys_user_role
+        action: post
+        data:
+          name: "{{ sn_papel_eda }}"
+          description: POC Glue -> ServiceNow -> EDA. Lê e grava as propriedades poc.eda.* (URL e token do webhook)
+      when: not papel_eda.record
+
+    - name: Ler o sys_id do usuário e dos papéis
+      servicenow.itsm.api_info:
+        instance: "{{ sn_admin }}"
+        resource: "{{ item.tabela }}"
+        sysparm_query: "{{ item.filtro }}"
+        columns: [sys_id]
+      loop:
+        - {tabela: sys_user, filtro: "user_name={{ sn_integracao_usuario }}"}
+        - {tabela: sys_user_role, filtro: name=itil}                  # abrir e atualizar incidentes
+        - {tabela: sys_user_role, filtro: "name={{ sn_papel_eda }}"}  # propriedades poc.eda.*
+      register: ids
+
+    - name: Verificar os papéis que o usuário já tem
+      servicenow.itsm.api_info:
+        instance: "{{ sn_admin }}"
+        resource: sys_user_has_role
+        sysparm_query: "user={{ ids.results[0].record[0].sys_id }}^role={{ item.record[0].sys_id }}"
+        columns: [sys_id]
+      loop: "{{ ids.results[1:] }}"
+      loop_control:
+        label: "{{ item.item.filtro }}"
+      register: papeis
+
+    - name: Dar os papéis que faltam
+      servicenow.itsm.api:
+        instance: "{{ sn_admin }}"
+        resource: sys_user_has_role
+        action: post
+        data:
+          user: "{{ ids.results[0].record[0].sys_id }}"
+          role: "{{ item.item.record[0].sys_id }}"
+      loop: "{{ papeis.results }}"
+      loop_control:
+        label: "{{ item.item.item.filtro }}"
+      when: not item.record
+
+    # ---------- propriedades do webhook ----------
+    - name: Procurar as propriedades do EDA
+      servicenow.itsm.api_info:
+        instance: "{{ sn_admin }}"
+        resource: sys_properties
+        sysparm_query: "name={{ item.nome }}"
+        columns: [sys_id]
+      loop:
+        - {nome: poc.eda.webhook_url, valor: "{{ eda_webhook_url | default('https://configure-com-poc-url', true) }}"}
+        - {nome: poc.eda.token, valor: "{{ lookup('ansible.builtin.env', 'EDA_TOKEN') }}"}
+      loop_control:
+        label: "{{ item.nome }}"
+      register: propriedades
+      tags: [url]
+
+    - name: Gravar as propriedades do EDA
+      servicenow.itsm.api:
+        instance: "{{ sn_admin }}"
+        resource: sys_properties
+        action: "{{ 'patch' if item.record else 'post' }}"
+        sys_id: "{{ item.record[0].sys_id if item.record else omit }}"
+        data:
+          name: "{{ item.item.nome }}"
+          value: "{{ item.item.valor }}"
+          type: string
+          description: POC Glue -> ServiceNow -> EDA
+          read_roles: "{{ sn_papel_eda }}"
+          write_roles: "{{ sn_papel_eda }}"
+      loop: "{{ propriedades.results }}"
+      loop_control:
+        label: "{{ item.item.nome }}"
+      no_log: true
+      tags: [url]
+
+    # ---------- business rule ----------
+    - name: Procurar a business rule
+      servicenow.itsm.api_info:
+        instance: "{{ sn_admin }}"
+        resource: sys_script
+        sysparm_query: "name={{ regra_nome }}"
+        columns: [sys_id]
+      register: regra
+
+    - name: Criar ou atualizar a business rule
+      servicenow.itsm.api:
+        instance: "{{ sn_admin }}"
+        resource: sys_script
+        action: "{{ 'patch' if regra.record else 'post' }}"
+        sys_id: "{{ regra.record[0].sys_id if regra.record else omit }}"
+        data:
+          name: "{{ regra_nome }}"
+          collection: incident
+          # async_always é o "async" atual; o valor "async" antigo está marcado como obsoleto na instância
+          when: async_always
+          order: "100"
+          active: "true"
+          advanced: "true"
+          action_insert: "true"
+          action_update: "false"
+          # Só incidentes abertos pelo usuário de integração (o EventBridge): um incidente criado
+          # por outra pessoa com correlation_display = aws-glue não aciona a automação
+          condition: "current.correlation_display == 'aws-glue' && current.sys_created_by == '{{ sn_integracao_usuario }}'"
+          script: "{{ lookup('ansible.builtin.file', 'servicenow/acionar_eda.js') }}"
+
+    - name: Resumo
+      ansible.builtin.debug:
+        msg:
+          - "Usuário de integração: {{ sn_integracao_usuario }} (só web service, papéis itil e {{ sn_papel_eda }})"
+          - "Webhook do EDA: {{ eda_webhook_url | default('ainda não configurado: rode ./poc.sh url <URL do túnel>', true) }}"
+          - "Business rule: {{ regra_nome }}"
+      tags: [url]

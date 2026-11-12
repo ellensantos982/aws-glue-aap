@@ -1,0 +1,37 @@
+---
+# Faz o job Glue travar uma vez: em ~2 min o Glue o encerra por timeout e o fluxo começa.
+#   ./poc.sh simular
+- name: Simular job Glue travado
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/vars.yml
+
+  tasks:
+    - name: Descobrir a conta AWS
+      amazon.aws.aws_caller_info:
+      register: conta
+
+    - name: Armar o travamento (o job consome o marcador e trava)
+      amazon.aws.s3_object:
+        bucket: "{{ prefixo }}-{{ conta.account }}-{{ aws_region }}"
+        object: controle/travar-proxima-execucao
+        content: travar
+        mode: put
+        region: "{{ aws_region }}"
+
+    - name: Iniciar o job com timeout de 2 minutos
+      glue_job_run:
+        action: start
+        job_name: "{{ glue_job }}"
+        job_timeout: 2
+        region: "{{ aws_region }}"
+      register: execucao
+
+    - name: O que acontece agora
+      ansible.builtin.debug:
+        msg:
+          - "Execução {{ execucao.run_id }} iniciada e vai travar."
+          - "~2 min: o Glue encerra por TIMEOUT -> EventBridge abre o incidente na ServiceNow"
+          - "-> business rule chama o EDA -> Ansible reinicia o job e resolve o incidente (~2 min a mais)."

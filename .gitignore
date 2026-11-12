@@ -1,0 +1,7 @@
+.env
+setup/aap_configurar.conf
+*.retry
+__pycache__/
+event_stream_caminho.txt
+.ansible/
+**/aap_configurar.conf

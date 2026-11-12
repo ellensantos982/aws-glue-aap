@@ -1,0 +1,26 @@
+---
+# Catálogo de contas: o Ansible só age em conta, região e job que passem pelas regras daqui,
+# venha o que vier no incidente. A chave é o ID da conta, como chega no correlation_id
+# do incidente: <conta>|<região>|<job>|<execução>.
+contas:
+  "123456789012":
+    nome: laboratorio-poc
+    # Papel que o Ansible assume na conta (sts:AssumeRole); no POC, criado pela stack
+    papel_automacao: poc-glue-sn-automacao
+    external_id: poc-glue-sn-aap
+    regioes: [us-east-1]
+    # tag: só jobs com a tag tag_chave=tag_valor | lista: só os jobs de jobs_permitidos
+    elegibilidade: tag
+    tag_chave: auto-remediacao
+    tag_valor: sim
+    # max_restarts: 2                (opcional; sem ele vale o de vars.yml)
+    # espera_restart_segundos: 3600  (opcional; para jobs que demoram mais que o padrão de vars.yml)
+
+  # Exemplo de outra conta, com lista de jobs em vez de tag:
+  # "111122223333":
+  #   nome: dados-dev
+  #   papel_automacao: aap-auto-remediacao
+  #   regioes: [sa-east-1, us-east-1]
+  #   elegibilidade: lista
+  #   jobs_permitidos: [carga-diaria, consolida-saldos]
+  #   max_restarts: 2

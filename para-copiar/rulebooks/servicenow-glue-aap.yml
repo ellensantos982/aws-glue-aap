@@ -1,0 +1,43 @@
+---
+# Rulebook activation ligada a um Event Stream do AAP. O evento é o do monitoramento de jobs:
+# um JSON plano com account, region, jobName, jobRunId, jobState e jobSource.
+# O rulebook escolhe o job template e passa só o que o playbook precisa em job_args.extra_vars:
+# o número do incidente e o correlation_id (conta|região|job|execução), montado aqui.
+# Nenhum outro campo do evento (descrição, e-mail, grupo) chega ao playbook.
+# A fonte abaixo é substituída pelo Event Stream no mapeamento de fontes da activation.
+- name: Evento de job Glue -> EDA -> restart
+  hosts: all
+  sources:
+    - ansible.eda.webhook:
+        host: 0.0.0.0
+        port: 5000
+
+  rules:
+    - name: Job Glue travado
+      # Evento com chaves ({ }) ou barra vertical em algum campo é descartado: as chaves seriam
+      # avaliadas como expressão pelo Ansible, e a barra quebraria a separação do correlation_id.
+      #
+      # AJUSTAR (estado): quais estados entram. Para mais de um, troque a linha do jobState por
+      #   event.payload.jobState in ["TIMEOUT", "FAILED"]
+      # e repita a lista em glue_estados_travado (playbooks/vars/vars.yml).
+      #
+      # AJUSTAR (incidente): campo do evento que traz o número do incidente. Aqui ele se chama
+      # "number"; troque nas duas linhas marcadas. Enquanto o evento não trouxer esse campo,
+      # a regra não dispara e nada é feito.
+      condition: >-
+        event.payload.jobSource == "aws.glue" and
+        event.payload.jobState == "TIMEOUT" and
+        event.payload.account is match("[0-9]{12}$") and
+        event.payload.region is match("[a-z0-9-]+$") and
+        event.payload.jobName is defined and
+        event.payload.jobName is not search("[{}|]") and
+        event.payload.jobRunId is match("jr_[A-Za-z0-9_]+$") and
+        event.payload.number is match("[A-Z]+[0-9]+$")
+      action:
+        run_job_template:
+          organization: "AJUSTAR-organizacao"       # organização do job template no AAP
+          name: "AJUSTAR-nome-do-job-template"      # job template que roda playbooks/restart_glue_job.yml
+          job_args:
+            extra_vars:
+              incidente_numero: "{{ event.payload.number }}"
+              correlation_id: "{{ event.payload.account }}|{{ event.payload.region }}|{{ event.payload.jobName }}|{{ event.payload.jobRunId }}"

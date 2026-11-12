@@ -1,0 +1,308 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  POC Glue -> ServiceNow -> EDA. Um job Glue que trava (timeout) gera um evento no EventBridge,
+  que abre um incidente na ServiceNow pela Table API (API destination).
+
+Parameters:
+  ServiceNowInstancia:
+    Type: String
+    Description: Host da instância, ex. dev123456.service-now.com (sem https://)
+  ServiceNowUsuario:
+    Type: String
+    Default: poc.integracao.aws
+  ServiceNowSenha:
+    Type: String
+    NoEcho: true
+  Prefixo:
+    Type: String
+    Default: poc-glue-sn
+  ExternalIdAutomacao:
+    Type: String
+    Default: poc-glue-sn-aap
+    Description: ExternalId exigido de quem assume o papel de automação
+  PrincipalAutomacao:
+    Type: String
+    Default: ""
+    Description: >-
+      ARN de quem pode assumir o papel de automação (o AAP). Vazio: qualquer identidade
+      desta conta que tenha permissão de sts:AssumeRole.
+  EmailAlertas:
+    Type: String
+    Default: ""
+    Description: >-
+      E-mail que recebe o alarme de eventos não entregues à ServiceNow. Vazio: o alarme
+      e o tópico SNS existem, mas sem assinante.
+
+Conditions:
+  PrincipalDaConta: !Equals [!Ref PrincipalAutomacao, ""]
+  TemEmailAlertas: !Not [!Equals [!Ref EmailAlertas, ""]]
+
+Resources:
+  # ---------- Glue ----------
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${Prefixo}-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  RoleGlue:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefixo}-glue"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: glue.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: acesso-poc
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt Bucket.Arn
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${Bucket.Arn}/scripts/*"
+              - Effect: Allow
+                Action: [s3:GetObject, s3:DeleteObject]
+                Resource: !Sub "${Bucket.Arn}/controle/*"
+              # saida* (e não saida/*): ao sobrescrever, o Spark grava o marcador "saida_$folder$"
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource: !Sub "${Bucket.Arn}/saida*"
+
+  JobGlue:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub "${Prefixo}-carga-diaria"
+      Description: Job do POC. Trava uma vez quando existe o marcador controle/travar-proxima-execucao.
+      Role: !GetAtt RoleGlue.Arn
+      GlueVersion: "5.0"
+      WorkerType: G.1X
+      NumberOfWorkers: 2          # mínimo do Glue: centavos por execução
+      MaxRetries: 0               # quem reinicia é o Ansible
+      Timeout: 10                 # minutos; a simulação usa 2 min por execução
+      ExecutionProperty: {MaxConcurrentRuns: 2}
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://${Bucket}/scripts/job_travavel.py"
+      DefaultArguments:
+        "--bucket": !Ref Bucket
+        "--job-language": python
+      Tags:
+        auto-remediacao: sim     # o Ansible só reinicia jobs com esta tag (vars/contas.yml)
+
+  # ---------- Papel que o Ansible assume para tratar os jobs ----------
+  # Com várias contas, um papel destes em cada uma, confiando no principal do AAP
+  RoleAutomacao:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefixo}-automacao"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !If [PrincipalDaConta, !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root", !Ref PrincipalAutomacao]
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: {sts:ExternalId: !Ref ExternalIdAutomacao}
+      Policies:
+        - PolicyName: tratar-jobs-glue
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Consultas: em qualquer job do prefixo (o Ansible lê o job para explicar a recusa no incidente)
+              - Effect: Allow
+                Action: [glue:GetJob, glue:GetJobRun, glue:GetJobRuns, glue:GetTags]
+                Resource: !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:job/${Prefixo}-*"
+              # Iniciar e parar: só em job com a tag de auto-remediação. Mesmo com o catálogo do
+              # Ansible errado, o IAM não deixa mexer em job sem a tag.
+              - Effect: Allow
+                Action: [glue:StartJobRun, glue:BatchStopJobRun]
+                Resource: !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:job/${Prefixo}-*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/auto-remediacao": sim
+
+  # Identidade base do AAP: um usuário que só consegue assumir o papel de automação.
+  # A chave de acesso é criada à parte (aws iam create-access-key) e vai para a credencial do AAP.
+  UsuarioAap:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Sub "${Prefixo}-aap"
+      Policies:
+        - PolicyName: assumir-papel-automacao
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !GetAtt RoleAutomacao.Arn
+
+  # ---------- EventBridge -> ServiceNow ----------
+  ConexaoServiceNow:
+    Type: AWS::Events::Connection
+    Properties:
+      Name: !Sub "${Prefixo}-servicenow"
+      Description: Usuário de integração da ServiceNow (Basic auth na Table API)
+      AuthorizationType: BASIC
+      AuthParameters:
+        BasicAuthParameters:
+          Username: !Ref ServiceNowUsuario
+          Password: !Ref ServiceNowSenha
+        InvocationHttpParameters:
+          HeaderParameters:
+            - {Key: Accept, Value: application/json}
+
+  DestinoServiceNow:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      Name: !Sub "${Prefixo}-incidente"
+      ConnectionArn: !GetAtt ConexaoServiceNow.Arn
+      InvocationEndpoint: !Sub "https://${ServiceNowInstancia}/api/now/table/incident"
+      HttpMethod: POST
+      InvocationRateLimitPerSecond: 1
+
+  RoleEventBridge:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefixo}-eventbridge"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: events.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: chamar-servicenow
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: events:InvokeApiDestination
+                Resource: !GetAtt DestinoServiceNow.Arn
+
+  # Eventos que não chegaram na ServiceNow (instância hibernando, senha errada...) vão para cá
+  FilaFalhasEntrega:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${Prefixo}-falhas-entrega"
+      MessageRetentionPeriod: 1209600
+
+  PoliticaFilaFalhas:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref FilaFalhasEntrega]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: events.amazonaws.com}
+            Action: sqs:SendMessage
+            Resource: !GetAtt FilaFalhasEntrega.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/${Prefixo}-job-travado"
+
+  # Sem alarme, um evento parado nessa fila é um job travado que ninguém ficou sabendo
+  TopicoAlertas:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${Prefixo}-alertas"
+
+  AssinaturaEmailAlertas:
+    Type: AWS::SNS::Subscription
+    Condition: TemEmailAlertas
+    Properties:
+      TopicArn: !Ref TopicoAlertas
+      Protocol: email
+      Endpoint: !Ref EmailAlertas
+
+  AlarmeFalhasEntrega:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Prefixo}-falhas-entrega"
+      AlarmDescription: >-
+        Há evento de job Glue travado que o EventBridge não conseguiu entregar à ServiceNow
+        (instância fora do ar, senha errada). O incidente não foi aberto: tratar o job à mão.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt FilaFalhasEntrega.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref TopicoAlertas]
+
+  RegraJobTravado:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${Prefixo}-job-travado"
+      Description: Job Glue encerrado por timeout (travado) abre incidente na ServiceNow
+      EventPattern:
+        source: [aws.glue]
+        detail-type: [Glue Job State Change]
+        detail:
+          jobName: [!Ref JobGlue]
+          state: [TIMEOUT]
+      Targets:
+        - Id: servicenow
+          Arn: !GetAtt DestinoServiceNow.Arn
+          RoleArn: !GetAtt RoleEventBridge.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 10
+            MaximumEventAgeInSeconds: 3600
+          DeadLetterConfig:
+            Arn: !GetAtt FilaFalhasEntrega.Arn
+          InputTransformer:
+            InputPathsMap:
+              job: $.detail.jobName
+              execucao: $.detail.jobRunId
+              estado: $.detail.state
+              hora: $.time
+              regiao: $.region
+              conta: $.account
+            # correlation_id = <conta>|<região>|<job>|<execução>: é por ele que a business rule
+            # (duplicados) e o Ansible (onde agir) acham o job
+            InputTemplate: |
+              {
+                "short_description": "[AWS Glue] Job travado: <job>",
+                "description": "O job <job> (execução <execucao>) ficou travado e foi encerrado por timeout em <hora>. Estado: <estado>. Conta <conta>, região <regiao>.",
+                "category": "software",
+                "impact": "2",
+                "urgency": "2",
+                "correlation_display": "aws-glue",
+                "correlation_id": "<conta>|<regiao>|<job>|<execucao>"
+              }
+
+Outputs:
+  Bucket:
+    Value: !Ref Bucket
+  JobGlue:
+    Value: !Ref JobGlue
+  FilaFalhasEntrega:
+    Value: !Ref FilaFalhasEntrega
+  TopicoAlertas:
+    Value: !Ref TopicoAlertas
+  RoleAutomacao:
+    Value: !GetAtt RoleAutomacao.Arn
+  UsuarioAap:
+    Value: !Ref UsuarioAap

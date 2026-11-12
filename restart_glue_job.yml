@@ -1,0 +1,316 @@
+---
+# Acionado pelo EDA quando a ServiceNow avisa que um job Glue travou.
+# Confere conta, região e job no catálogo (vars/contas.yml), assume o papel de automação
+# na conta do job, confere que a execução do incidente travou de fato, reinicia o job
+# e resolve o incidente com o resultado. Não para nem reinicia nada além dessa execução,
+# e qualquer falha no caminho fica anotada no incidente.
+- name: Reiniciar job Glue travado
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/vars.yml
+    - vars/contas.yml
+  vars:
+    # O rulebook passa só incidente_numero e correlation_id, já conferidos na condição da regra
+    # (dá para lançar o job à mão com as duas variáveis). O playbook não lê o evento bruto:
+    # nenhum outro campo do incidente chega ao Jinja.
+    incidente:
+      number: "{{ incidente_numero | default('') }}"
+      correlation_id: "{{ correlation_id | default('') }}"
+    # correlation_id = <conta>|<região>|<job>|<execução>, montado pela regra do EventBridge
+    partes: "{{ (incidente.correlation_id | default('', true) | string).split('|') }}"
+    conta_id: "{{ partes[0] }}"
+    regiao: "{{ partes[1] | default('') }}"
+    job_name: "{{ partes[2] | default('') }}"
+    run_travado: "{{ partes[3] | default('') }}"
+    conta: "{{ contas[conta_id] | default({}) }}"
+    limite_restarts: "{{ conta.max_restarts | default(max_restarts) }}"
+    espera_restart: "{{ conta.espera_restart_segundos | default(espera_restart_segundos) }}"
+    sn_instancia:
+      host: "{{ sn_host }}"
+      username: "{{ sn_integracao_usuario }}"
+      password: "{{ lookup('ansible.builtin.env', 'SN_INTEGRACAO_SENHA') }}"
+
+  # Todas as chamadas ao Glue usam a região do job e a credencial temporária do papel assumido.
+  # O default('') é para o ansible-core 2.16 (EE do AAP), que avalia isto já nas tarefas
+  # anteriores ao assume role; o Glue só é chamado depois dele.
+  module_defaults:
+    glue_job_run:
+      region: "{{ regiao }}"
+      access_key: "{{ sessao.sts_creds.access_key | default('') }}"
+      secret_key: "{{ sessao.sts_creds.secret_key | default('') }}"
+      session_token: "{{ sessao.sts_creds.session_token | default('') }}"
+      profile: ""     # anula o AWS_PROFILE do ambiente (CLI), que conflita com a credencial temporária
+
+  tasks:
+    # O número vai para a ServiceNow e para o nome da sessão do papel: fora do padrão, nada é feito.
+    - name: Conferir o número do incidente
+      ansible.builtin.assert:
+        that:
+          - incidente.number | default('', true) | string is match('^[A-Z]{2,10}[0-9]{4,}$')
+        fail_msg: "Número de incidente ausente ou fora do padrão: nada foi feito."
+        quiet: true
+
+    - name: Conferir o incidente contra o catálogo de contas
+      ansible.builtin.set_fact:
+        motivo_recusa: "{{ verificacoes | selectattr('falhou') | map(attribute='motivo') | first | default('') }}"
+      vars:
+        verificacoes:
+          # As quatro partes são obrigatórias: sem a execução, não há como conferir o travamento
+          - falhou: "{{ partes | length != 4 or partes | map('trim') | select | list | length != 4 }}"
+            motivo: "correlation_id fora do formato conta|região|job|execução ({{ incidente.correlation_id | default('vazio', true) }})"
+          - falhou: "{{ conta_id not in contas }}"
+            motivo: "a conta {{ conta_id }} não está no catálogo de contas da automação"
+          - falhou: "{{ regiao not in conta.regioes | default([]) }}"
+            motivo: "a região {{ regiao }} não está liberada para a conta {{ conta_id }}"
+          # Catálogo incompleto ou com erro de digitação recusa, em vez de liberar todos os jobs da conta
+          - falhou: "{{ conta.papel_automacao | default('') | length == 0 }}"
+            motivo: "a conta {{ conta_id }} está no catálogo sem papel_automacao"
+          - falhou: "{{ conta.elegibilidade | default('') not in ['tag', 'lista'] }}"
+            motivo: "a conta {{ conta_id }} está no catálogo sem um critério de elegibilidade válido (tag ou lista)"
+          - falhou: >-
+              {{ conta.elegibilidade | default('') == 'tag' and
+                 (conta.tag_chave | default('') | string | length == 0 or conta.tag_valor | default('') | string | length == 0) }}
+            motivo: "a conta {{ conta_id }} usa elegibilidade por tag, mas está no catálogo sem tag_chave ou tag_valor"
+          - falhou: "{{ conta.elegibilidade | default('') == 'lista' and job_name not in conta.jobs_permitidos | default([]) }}"
+            motivo: "o job {{ job_name }} não está na lista de jobs permitidos da conta {{ conta_id }}"
+
+    - name: Tratar o incidente
+      block:
+        - name: Assumir o papel de automação na conta do job
+          amazon.aws.sts_assume_role:
+            role_arn: "arn:aws:iam::{{ conta_id }}:role/{{ conta.papel_automacao }}"
+            role_session_name: "aap-{{ incidente.number }}"
+            external_id: "{{ conta.external_id | default(omit) }}"
+            duration_seconds: 3600
+            region: "{{ regiao }}"
+          register: sessao
+          failed_when: false
+          no_log: true     # o resultado traz a credencial temporária; sem isto ela ficaria no log do job
+          when: motivo_recusa | length == 0
+
+        # Ex.: conta nova em que o papel ainda não foi criado, ou ExternalId diferente do catálogo
+        - name: Conferir se o papel foi assumido
+          ansible.builtin.set_fact:
+            motivo_recusa: >-
+              não foi possível assumir o papel {{ conta.papel_automacao }} na conta {{ conta_id }}
+              ({{ sessao.error.code | default(sessao.msg | default('erro desconhecido')) }})
+          when: sessao is not skipped and sessao.sts_creds is not defined
+
+        - name: Ler as tags do job
+          glue_job_run:
+            action: tags
+            job_name: "{{ job_name }}"
+          register: tags_job
+          when: motivo_recusa | length == 0 and conta.elegibilidade | default('') == 'tag'
+
+        - name: Conferir a tag de auto-remediação
+          ansible.builtin.set_fact:
+            motivo_recusa: >-
+              {{ 'o job ' ~ job_name ~ ' não existe na conta ' ~ conta_id ~ ', região ' ~ regiao if not tags_job.encontrado
+                 else 'o job ' ~ job_name ~ ' não tem a tag ' ~ conta.tag_chave ~ '=' ~ conta.tag_valor }}
+          when:
+            - tags_job is not skipped
+            - not tags_job.encontrado or tags_job.tags[conta.tag_chave] | default('') != conta.tag_valor
+
+        # O incidente só vale se a execução que ele cita existir e tiver travado (glue_estados_travado).
+        # Um incidente com dados inventados ou de uma execução saudável não mexe no Glue.
+        - name: Ler a execução que travou
+          glue_job_run:
+            action: info
+            job_name: "{{ job_name }}"
+            run_id: "{{ run_travado }}"
+          register: travada
+          failed_when: false
+          when: motivo_recusa | length == 0
+
+        - name: Conferir se a execução do incidente travou de fato
+          ansible.builtin.set_fact:
+            motivo_recusa: >-
+              {{ 'a execução ' ~ run_travado ~ ' não foi encontrada no job ' ~ job_name ~ ' (' ~ travada.msg | default('sem detalhe') ~ ')'
+                 if travada.job_run is not defined
+                 else 'a execução ' ~ travada.job_run.Id ~ ' está em ' ~ travada.job_run.JobRunState ~ ', e não em ' ~ glue_estados_travado | join(' ou ') }}
+          when:
+            - travada is not skipped
+            - travada.job_run is not defined or travada.job_run.JobRunState not in glue_estados_travado
+
+        # Incidente repetido para a mesma execução travada (ex.: reenvio do EventBridge, ou alguém abriu
+        # outro chamado): se o job já foi reiniciado depois dela, não reinicia de novo.
+        - name: Ver se o job já foi reiniciado depois desse travamento
+          glue_job_run:
+            action: count
+            job_name: "{{ job_name }}"
+            argument_name: --origem
+            argument_value: ansible-restart
+            after_run_id: "{{ travada.job_run.Id }}"
+          register: ja_reiniciado
+          when: motivo_recusa | length == 0
+
+        - name: Encerrar como duplicado
+          when: ja_reiniciado.count | default(0) | int > 0
+          block:
+            - name: Resolver o incidente como duplicado
+              servicenow.itsm.incident:
+                instance: "{{ sn_instancia }}"
+                number: "{{ incidente.number }}"
+                state: resolved
+                close_code: "{{ sn_close_code_duplicado }}"
+                close_notes: >-
+                  A execução travada {{ travada.job_run.Id }} já foi tratada: o job foi reiniciado pelo Ansible
+                  ({{ ja_reiniciado.execucoes | map(attribute='id') | join(', ') }}). Nada a fazer.
+
+            - name: Parar aqui
+              ansible.builtin.meta: end_play
+
+        # Uma execução iniciada depois da travada e ainda em andamento (agendamento, alguém reiniciou
+        # à mão) não é a que travou: a automação não a interrompe nem inicia outra por cima.
+        - name: Procurar execuções mais novas em andamento
+          glue_job_run:
+            action: running
+            job_name: "{{ job_name }}"
+            after_run_id: "{{ travada.job_run.Id }}"
+          register: mais_novas
+          when: motivo_recusa | length == 0
+
+        - name: Não reiniciar se o job já está rodando de novo
+          ansible.builtin.set_fact:
+            motivo_recusa: >-
+              o job {{ job_name }} já tem execução mais nova em andamento
+              ({{ mais_novas.runs | map(attribute='Id') | join(', ') }}); nada foi parado nem reiniciado
+          when: mais_novas is not skipped and mais_novas.runs | length > 0
+
+        - name: Não agir em conta, região, job ou execução fora das regras
+          when: motivo_recusa | length > 0
+          block:
+            - name: Anotar no incidente
+              servicenow.itsm.incident:
+                instance: "{{ sn_instancia }}"
+                number: "{{ incidente.number }}"
+                other:
+                  work_notes: "A automação não atuou: {{ motivo_recusa }}. Encaminhar para a sustentação."
+
+            - name: Interromper
+              ansible.builtin.fail:
+                msg: "Incidente {{ incidente.number }}: {{ motivo_recusa }}"
+
+        - name: Contar os restarts recentes do job
+          glue_job_run:
+            action: count
+            job_name: "{{ job_name }}"
+            argument_name: --origem
+            argument_value: ansible-restart
+            hours: "{{ janela_restarts_horas }}"
+          register: restarts
+
+        - name: Escalar se o job já foi reiniciado demais
+          when: restarts.count | int >= limite_restarts | int
+          block:
+            - name: Anotar no incidente
+              servicenow.itsm.incident:
+                instance: "{{ sn_instancia }}"
+                number: "{{ incidente.number }}"
+                other:
+                  work_notes: >-
+                    O job já foi reiniciado {{ restarts.count }} vezes na última {{ janela_restarts_horas }} h (limite {{ limite_restarts }}).
+                    A automação não vai reiniciar de novo: encaminhar para a sustentação.
+
+            - name: Interromper
+              ansible.builtin.fail:
+                msg: "Limite de restarts atingido para {{ job_name }}"
+
+        - name: Assumir o incidente
+          servicenow.itsm.incident:
+            instance: "{{ sn_instancia }}"
+            number: "{{ incidente.number }}"
+            state: in_progress
+            other:
+              work_notes: "Ansible recebeu o incidente pelo Event-Driven Ansible. Reiniciando o job {{ job_name }}."
+
+        # Com glue_estados_travado só em TIMEOUT a execução já terminou e nada é parado. Se um dia a
+        # detecção incluir execução ainda ativa (sem progresso), só ela é parada, nunca as demais.
+        - name: Parar a execução travada, se ainda estiver ativa
+          glue_job_run:
+            action: stop
+            job_name: "{{ job_name }}"
+            run_ids: ["{{ travada.job_run.Id }}"]
+            timeout: 300
+          register: parada
+          when: travada.job_run.JobRunState in ['STARTING', 'RUNNING', 'STOPPING', 'WAITING']
+
+        - name: Reiniciar o job com os mesmos argumentos
+          glue_job_run:
+            action: start
+            job_name: "{{ job_name }}"
+            arguments: "{{ travada.job_run.Arguments | default({}) | combine({'--origem': 'ansible-restart'}) }}"
+          register: novo
+
+        - name: Avisar no incidente que o job foi reiniciado
+          servicenow.itsm.incident:
+            instance: "{{ sn_instancia }}"
+            number: "{{ incidente.number }}"
+            other:
+              work_notes: >-
+                {{ (parada is not skipped) | ternary('Execução travada ' ~ travada.job_run.Id ~ ' parada. ', '') }}Job reiniciado:
+                nova execução {{ novo.run_id }}. Aguardando o término.
+
+        # Se a espera acabar com o restart ainda rodando, o módulo devolve a execução como está
+        # (tratada logo abaixo); só falha aqui quando não conseguiu consultar o Glue.
+        - name: Aguardar o término
+          glue_job_run:
+            action: wait
+            job_name: "{{ job_name }}"
+            run_id: "{{ novo.run_id }}"
+            timeout: "{{ espera_restart }}"
+          register: final
+          failed_when: final.job_run is not defined
+
+        - name: Resolver o incidente
+          servicenow.itsm.incident:
+            instance: "{{ sn_instancia }}"
+            number: "{{ incidente.number }}"
+            state: resolved
+            close_code: "{{ sn_close_code }}"
+            close_notes: >-
+              Job {{ job_name }} reiniciado automaticamente pelo Ansible (Event-Driven Ansible).
+              Execução {{ novo.run_id }} concluída com sucesso em {{ final.job_run.ExecutionTime | default('?') }} s.
+          when: final.job_run.JobRunState == 'SUCCEEDED'
+
+        - name: Registrar que o restart não resolveu
+          when: final.job_run.JobRunState != 'SUCCEEDED'
+          vars:
+            estado: "{{ final.job_run.JobRunState }}"
+            terminou: "{{ final.job_run.JobRunState in ['FAILED', 'TIMEOUT', 'STOPPED', 'ERROR'] }}"
+          block:
+            - name: Anotar no incidente
+              servicenow.itsm.incident:
+                instance: "{{ sn_instancia }}"
+                number: "{{ incidente.number }}"
+                other:
+                  work_notes: >-
+                    {{ 'O restart (execução ' ~ novo.run_id ~ ') terminou em ' ~ estado ~ ': ' ~ final.job_run.ErrorMessage | default('sem mensagem')
+                       if terminou | bool
+                       else 'O restart (execução ' ~ novo.run_id ~ ') ainda está em ' ~ estado ~ ' depois de ' ~ espera_restart ~ ' s de espera' }}.
+                    Encaminhar para a sustentação.
+
+            - name: Interromper
+              ansible.builtin.fail:
+                msg: "Restart de {{ job_name }} ({{ novo.run_id }}) em {{ estado }}"
+
+      # Falha inesperada em qualquer etapa (API do Glue, ServiceNow, limite de execuções simultâneas...):
+      # o incidente recebe a nota. As interrupções acima (fail) já deixaram a sua própria nota.
+      rescue:
+        - name: Anotar a falha no incidente
+          servicenow.itsm.incident:
+            instance: "{{ sn_instancia }}"
+            number: "{{ incidente.number }}"
+            other:
+              work_notes: >-
+                A automação falhou na etapa "{{ ansible_failed_task.name }}":
+                {{ ansible_failed_result.msg | default('sem mensagem') | string | truncate(600) }}.
+                Confira o estado do job {{ job_name }} e encaminhe para a sustentação.
+          when: ansible_failed_task.action not in ['fail', 'ansible.builtin.fail']
+
+        - name: Encerrar com erro
+          ansible.builtin.fail:
+            msg: "{{ ansible_failed_result.msg | default('Falha na etapa ' ~ ansible_failed_task.name) }}"

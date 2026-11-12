@@ -1,0 +1,53 @@
+---
+# Sobe a parte AWS do POC (stack CloudFormation) e envia o script do job Glue.
+#   ./poc.sh aws
+- name: Provisionar a AWS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../vars/vars.yml
+
+  tasks:
+    - name: Conferir o .env
+      ansible.builtin.assert:
+        that:
+          - sn_host is match('https://')
+          - lookup('ansible.builtin.env', 'SN_INTEGRACAO_SENHA') | length >= 12
+        fail_msg: "Preencha SN_HOST e SN_INTEGRACAO_SENHA no .env (e rode ./poc.sh servicenow antes)"
+
+    - name: Criar ou atualizar a stack {{ stack }}
+      amazon.aws.cloudformation:
+        stack_name: "{{ stack }}"
+        state: present
+        region: "{{ aws_region }}"
+        template_body: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../aws/poc-glue-servicenow.yaml') }}"
+        capabilities: [CAPABILITY_NAMED_IAM]
+        template_parameters:
+          Prefixo: "{{ prefixo }}"
+          ServiceNowInstancia: "{{ sn_host | regex_replace('^https://', '') }}"
+          ServiceNowUsuario: "{{ sn_integracao_usuario }}"
+          ServiceNowSenha: "{{ lookup('ansible.builtin.env', 'SN_INTEGRACAO_SENHA') }}"
+          EmailAlertas: "{{ lookup('ansible.builtin.env', 'ALERTAS_EMAIL') | default('', true) }}"
+      register: stack_criada
+      # Com -vvv o Ansible mostra os parâmetros da tarefa, inclusive a senha: nesse nível, oculta tudo.
+      # Sem -vvv a senha não aparece e os erros do CloudFormation continuam legíveis.
+      no_log: "{{ ansible_verbosity >= 3 }}"
+
+    - name: Enviar o script do job Glue
+      amazon.aws.s3_object:
+        bucket: "{{ stack_criada.stack_outputs.Bucket }}"
+        object: scripts/job_travavel.py
+        src: "{{ playbook_dir }}/../aws/glue/job_travavel.py"
+        mode: put
+        region: "{{ aws_region }}"
+
+    - name: Resumo
+      ansible.builtin.debug:
+        msg:
+          - "Bucket:   s3://{{ stack_criada.stack_outputs.Bucket }}"
+          - "Job Glue: {{ stack_criada.stack_outputs.JobGlue }}"
+          - "Eventos que não chegarem na ServiceNow ficam na fila {{ stack_criada.stack_outputs.FilaFalhasEntrega }}"
+          - "Alarme dessa fila avisa no tópico SNS {{ stack_criada.stack_outputs.TopicoAlertas }} (e-mail: {{ lookup('ansible.builtin.env', 'ALERTAS_EMAIL') | default('nenhum; defina ALERTAS_EMAIL no .env', true) }})"
+          - "Papel de automação (assumido pelo Ansible): {{ stack_criada.stack_outputs.RoleAutomacao }}"
+          - "Usuário IAM para a credencial do AAP (só assume esse papel): {{ stack_criada.stack_outputs.UsuarioAap }}"

@@ -1,0 +1,34 @@
+---
+# Variáveis do restart_glue_job.yml. Contas, regiões e jobs em que o Ansible pode agir: vars/contas.yml
+
+# Evita loop (restart que trava de novo abre outro incidente): no máximo N restarts por job na janela
+# (padrão; cada conta pode ter o seu em vars/contas.yml)
+max_restarts: 3
+janela_restarts_horas: 1
+
+# O incidente só é tratado se a execução que ele cita estiver num destes estados.
+# AJUSTAR junto com a condição do rulebook (jobState): os dois precisam aceitar os mesmos estados.
+glue_estados_travado: [TIMEOUT]
+# Quanto esperar o restart terminar antes de devolver o incidente com a execução ainda em andamento
+# (padrão; cada conta pode ter o seu em vars/contas.yml, em espera_restart_segundos)
+espera_restart_segundos: 900
+
+# ServiceNow: SN_HOST e SN_INTEGRACAO_SENHA vêm do ambiente (credencial do AAP que injeta as duas)
+sn_host: "{{ lookup('ansible.builtin.env', 'SN_HOST') | regex_replace('/$', '') }}"
+sn_integracao_usuario: AJUSTAR-usuario-de-integracao
+
+# Códigos de resolução: precisam existir na instância
+sn_close_code: Solved (Permanently)
+sn_close_code_duplicado: Duplicate      # AJUSTAR se a instância usar outro código para duplicado
+
+# Campos gravados no incidente além de estado, código e notas, no padrão de fechamento do ambiente.
+# AJUSTAR-usuario-generico: o usuário genérico da automação, no formato que a instância aceita
+# (sys_id ou nome de usuário). Para não gravar um campo, apague a linha dele.
+sn_campos_ao_assumir:
+  assigned_to: AJUSTAR-usuario-generico
+sn_campos_ao_resolver:
+  assigned_to: AJUSTAR-usuario-generico
+  resolved_by: AJUSTAR-usuario-generico
+  u_automation_status: SUCESSO
+  # Horário de normalização do impacto: a hora em que a automação resolveu
+  u_impact_end: "{{ now(fmt='%Y-%m-%d %H:%M:%S') }}"

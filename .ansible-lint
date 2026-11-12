@@ -1,0 +1,4 @@
+---
+# Template CloudFormation (tags !Ref/!Sub) é validado com cfn-lint, não com ansible-lint
+exclude_paths:
+  - aws/

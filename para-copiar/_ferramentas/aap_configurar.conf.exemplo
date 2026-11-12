@@ -1,0 +1,54 @@
+# Copie para aap_configurar.conf (mesma pasta) e preencha. Não guarda segredos: senhas e tokens
+# são pedidos na hora pelo aap_configurar.sh, ou vêm de variáveis de ambiente (ver o cabeçalho dele).
+# Formato: CHAVE=valor, sem aspas. Os valores do laboratório estão nos comentários.
+
+# --- Plataforma ---
+# Lab: https://aap.lab.example
+AAP_URL=https://aap.exemplo.interno
+# Usuário que cria os objetos. Com token de API (variável AAP_TOKEN), pode ficar vazio
+AAP_USUARIO=
+# "sim" só em laboratório com certificado autoassinado
+AAP_TLS_INSEGURO=nao
+AAP_ORGANIZACAO=Default
+
+# --- Repositório da automação ---
+# Lab: http://<ip-da-vm>:8090/cgi-bin/git/poc-glue-servicenow.git, branch main
+REPO_GIT=
+REPO_BRANCH=develop
+# Nome de credenciais de Source Control que já existem no AAP (uma no Controller, outra no EDA).
+# Vazio = repositório sem autenticação
+REPO_CREDENCIAL_CONTROLLER=
+REPO_CREDENCIAL_EDA=
+# Caminho do playbook dentro do repositório. Lab: restart_glue_job.yml
+PLAYBOOK=playbooks/restart_glue_job.yml
+# Nome do arquivo dentro da pasta rulebooks/
+RULEBOOK=servicenow-glue-aap.yml
+
+# --- Ambientes de execução, com o nome que aparece no AAP ---
+# Lab: Hub Default execution environment / Hub Default Decision Environment
+EXECUTION_ENVIRONMENT=
+DECISION_ENVIRONMENT=
+
+# --- AWS ---
+# Nome de uma credencial "Amazon Web Services" que já existe no AAP (lab: POC AWS).
+# Vazio = o job template fica sem credencial da AWS (perfil de instância)
+AWS_CREDENCIAL=
+
+# --- ServiceNow ---
+SN_HOST=https://exemplo.service-now.com
+
+# --- Usuário com que o EDA lança o job template ---
+# Precisa só do papel Execute no job template. Vazio = usa AAP_USUARIO
+EDA_CONTROLLER_USUARIO=
+
+# --- Nomes dos objetos (os do laboratório são o padrão) ---
+# NOME_JOB_TEMPLATE e AAP_ORGANIZACAO precisam ser os mesmos citados no rulebook
+NOME_JOB_TEMPLATE=poc-restart-glue-job
+NOME_TIPO_CREDENCIAL_SN=POC ServiceNow (integracao)
+NOME_CREDENCIAL_SN=POC ServiceNow
+NOME_PROJETO=POC Glue ServiceNow
+NOME_INVENTARIO=POC localhost
+NOME_CREDENCIAL_EDA_CONTROLLER=POC AAP controller
+NOME_CREDENCIAL_EDA_TOKEN=POC ServiceNow token
+NOME_EVENT_STREAM=poc-servicenow-glue
+NOME_ACTIVATION=poc-servicenow-glue-restart
