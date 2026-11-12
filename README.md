@@ -222,6 +222,8 @@ Validado de novo em 12/11/2026, com a stack, a ServiceNow e o AAP atualizados (o
 
 Os cenários de recusa e o INC0010019 foram entregues ao Event Stream pela rede do lab, com o mesmo corpo que a business rule envia. Ficaram de fora o limite de restarts, a credencial "POC AWS" com a chave do usuário `poc-glue-sn-aap` e o usuário `poc-eda` (o EDA lançou o job como admin).
 
+Depois disso o catálogo de contas foi retirado (a conta vem do incidente e o papel tem o mesmo nome em todas). A versão sem catálogo foi conferida no mesmo dia: pela linha de comando, conta e região fora do padrão, região fora da lista, conta sem o papel, job inexistente, job fora da lista, execução que não travou e execução já reiniciada; pelo AAP, conta sem o papel e execução já reiniciada. O restart completo não foi repetido nessa versão.
+
 O teste revelou um defeito, já corrigido: a business rule gravava a nota de trabalho com `setValue`, que não cria a entrada no campo de diário; a nota não aparecia no incidente.
 
 O papel do POC (`poc-glue-sn-automacao`, criado pela stack) confia nas identidades da própria conta e exige o ExternalId `poc-glue-sn-aap`. Para restringir a um principal só (o do AAP), passe o ARN no parâmetro `PrincipalAutomacao` da stack. Permissões do papel, só nos jobs `poc-glue-sn-*`: consultas (`glue:GetJob`, `glue:GetJobRun`, `glue:GetJobRuns`, `glue:GetTags`) em qualquer um deles; `glue:StartJobRun` e `glue:BatchStopJobRun` apenas nos que têm a tag `auto-remediacao=sim` (condição `aws:ResourceTag`). Não precisa de `iam:PassRole`.
