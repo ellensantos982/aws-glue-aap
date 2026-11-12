@@ -10,6 +10,7 @@ Tudo aqui se faz pelo Git Bash: não é preciso PowerShell, WSL nem Ansible na m
 | `playbooks/vars/vars.yml` | `playbooks/vars/` | Tudo o que depende do ambiente: campos do evento, estados aceitos, papel na AWS, regras de elegibilidade e campos de fechamento |
 | `plugins/modules/glue_job_run.py` | `plugins/modules/` | Módulo que inicia, para e consulta execuções do Glue |
 | `rulebooks/servicenow-glue-aap.yml` | `rulebooks/` | Rulebook da activation: separa os eventos do Glue e entrega o evento ao job template |
+| `rulebooks/glue-eventos-observar.yml` | `rulebooks/` | Rulebook só de leitura: mostra os eventos no log da activation, sem lançar job |
 | `collections/requirements.yml` | `collections/` | Coleções necessárias (juntar ao que já existir) |
 
 ## Como o evento é lido
@@ -32,6 +33,15 @@ Se um dado vier em outro campo, basta trocar o nome em `evento_campos` e dar pus
 Evento com estado fora de `glue_estados_travado` termina sem tocar no incidente. Nos demais casos de recusa (dado ausente ou fora do padrão, job sem a tag, execução que não travou), o motivo fica anotado no incidente. O ID da execução pode vir com o sufixo de nova tentativa (`jr_..._attempt_1`).
 
 Como o Event Stream entrega todos os eventos do Glue, cada um vira um job curto no AAP, mesmo os ignorados. Se o volume incomodar, acrescente o estado à condição do rulebook.
+
+### Usar um Event Stream que já recebe os eventos
+
+Se os eventos do Glue já chegam a um Event Stream do AAP e outra activation os lê, não é preciso mudar nada em quem envia: um Event Stream pode alimentar várias activations, e cada uma recebe todos os eventos. Basta escolher esse mesmo Event Stream no mapeamento de fontes da activation nova.
+
+Dois cuidados:
+
+- **As duas activations agem sobre o mesmo evento.** Confira o que o outro rulebook faz com o incidente antes de ligar esta automação, para as duas não disputarem o mesmo incidente.
+- **Confira o formato antes.** Crie primeiro uma activation com o `rulebooks/glue-eventos-observar.yml`: ela só mostra cada evento no log (aba *History*), sem lançar job nem tocar em nada. Com o evento real na mão, acerte `evento_campos` no `vars.yml` e a condição do rulebook principal, e apague a activation de leitura.
 
 ### Pontos em aberto
 

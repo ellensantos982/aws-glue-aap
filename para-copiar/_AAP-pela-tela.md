@@ -119,7 +119,7 @@ Sem senha local e sem poder criar token, não dá para criar esta credencial: us
 
 ### 8. Event Stream *(se não existir)*
 
-Se o monitoramento já envia os eventos para um Event Stream do AAP, use esse e pule este passo.
+Se os eventos já chegam a um Event Stream do AAP, use esse e pule este passo, mesmo que outra activation já o leia: um Event Stream pode alimentar várias activations. Para escolhê-lo no passo 10, seu usuário precisa enxergar esse Event Stream (ele pertence a uma organização).
 
 1. *Automation Decisions → Infrastructure → Credentials → Create credential*, com um tipo de Event Stream. Para um token simples: tipo *Token Event Stream*, o token combinado com quem envia e o cabeçalho (`Authorization`).
 2. *Automation Decisions → Event Streams → Create event stream*: nome, organização, o tipo e a credencial acima. Deixe ligado o encaminhamento dos eventos para a activation (*Forward events to rulebook activation*).
@@ -145,6 +145,8 @@ Se o monitoramento já envia os eventos para um Event Stream do AAP, use esse e 
 | Rulebook activation enabled | ligado |
 
 Salve e espere o status *Running*.
+
+Para só ver os eventos antes de ligar a automação, crie do mesmo jeito uma activation com o rulebook `glue-eventos-observar.yml` (sem a credencial do passo 7, que ela não usa). Cada evento aparece inteiro na aba *History*; depois de conferir, apague essa activation.
 
 A activation guarda uma cópia do rulebook. Se o rulebook mudar no Git (organização, nome do job template, condição), sincronize o projeto do EDA e crie a activation de novo. Mudança no `vars.yml` não exige nada disso.
 

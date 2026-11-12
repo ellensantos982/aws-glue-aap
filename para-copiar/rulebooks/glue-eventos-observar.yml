@@ -1,0 +1,18 @@
+---
+# Só leitura: mostra no log da activation cada evento que chega ao Event Stream.
+# Não lança job template nem altera nada. Serve para conferir o formato do evento (nomes dos
+# campos, onde vem o incidente) antes de ligar a automação. Depois de conferir, apague a activation.
+# A fonte abaixo é substituída pelo Event Stream no mapeamento de fontes da activation.
+- name: Observar os eventos do Event Stream
+  hosts: all
+  sources:
+    - ansible.eda.webhook:
+        host: 0.0.0.0
+        port: 5000
+
+  rules:
+    - name: Mostrar o evento
+      condition: event.payload is defined
+      action:
+        print_event:
+          pretty: true
