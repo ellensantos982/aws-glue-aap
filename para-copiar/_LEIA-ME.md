@@ -158,7 +158,9 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Authorization: errado' -H '
 
 ## Validação feita nesta pasta
 
-Os arquivos desta pasta rodaram no AAP 2.7 do laboratório, neste mesmo layout, numa branch de teste com os valores de lá (papel de automação, usuário e código de resolução do laboratório).
+Os arquivos desta pasta rodaram no AAP 2.7 do laboratório, numa branch de teste com os valores de lá (papel de automação, usuário e código de resolução do laboratório).
+
+- **Desenho atual da pasta** (playbook, variáveis e `library/` em `playbooks/glue-playbooks/`, sem `ansible.cfg` próprio e sem `requirements.yml`): conferido no AAP com dois eventos pelo Event Stream. O de estado não tratado foi ignorado; o de uma execução já reiniciada usou o módulo, consultou o Glue e fechou o incidente. Os cenários abaixo rodaram com o mesmo conteúdo no desenho anterior, com o módulo em `plugins/modules/`.
 
 - **Pelo Event Stream e pela activation**, com eventos no formato do monitoramento:
   - evento em `FAILED` terminou em "Evento ignorado", sem tocar no incidente;
