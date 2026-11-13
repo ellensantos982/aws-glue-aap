@@ -1,11 +1,11 @@
 ---
-# Rulebook activation ligada a um Event Stream do AAP, que recebe os eventos do monitoramento de jobs.
-# O rulebook só separa os eventos do Glue e entrega o evento inteiro ao job template, na variável
-# "evento". Quais campos são lidos, quais estados são tratados e todas as outras regras ficam nas
-# variáveis do playbook (playbooks/glue-playbooks/vars/restart_glue_job.yml): ajustar não exige mexer
-# aqui nem recriar a activation.
+# Rulebook activation ligada ao Event Stream que recebe os incidentes da ServiceNow.
+# O rulebook só separa os incidentes de job Glue e entrega o evento inteiro ao job template, na
+# variável "evento". Quais campos são lidos, quais estados são tratados e todas as outras regras
+# ficam nas variáveis do playbook (playbooks/glue-playbooks/vars/restart_glue_job.yml): ajustar
+# não exige mexer aqui nem recriar a activation.
 # A fonte abaixo é substituída pelo Event Stream no mapeamento de fontes da activation.
-- name: Evento de job Glue -> EDA -> restart
+- name: Incidente de job Glue -> EDA -> restart
   hosts: all
   sources:
     - ansible.eda.webhook:
@@ -13,8 +13,10 @@
         port: 5000
 
   rules:
-    - name: Evento de job Glue
-      condition: event.payload.jobSource == "aws.glue"
+    - name: Incidente de job Glue
+      # Os dados do job vêm no bloco u_additional_info do incidente. Se a origem não vier em
+      # jobSource, troque a condição (por exemplo, pelo número do KB do incidente).
+      condition: event.payload.u_additional_info.jobSource == "aws.glue"
       action:
         run_job_template:
           organization: "AJUSTAR-organizacao"       # organização do job template no AAP

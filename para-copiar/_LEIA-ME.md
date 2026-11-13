@@ -20,24 +20,27 @@ Por que cada coisa está onde está:
 
 ## Como o evento é lido
 
-O rulebook só confere que o evento é do Glue (`jobSource` igual a `aws.glue`) e entrega o evento inteiro ao job template, na variável `evento`. Todo o resto é decidido pelo playbook, a partir do arquivo de variáveis, `playbooks/glue-playbooks/vars/restart_glue_job.yml`:
+O evento é o incidente que a ServiceNow envia ao Event Stream do AAP. O identificador do incidente (`sys_id`) vem na raiz do evento, e os dados do job vêm num bloco dentro dele (`u_additional_info`).
+
+O rulebook só confere que o incidente é de um job Glue (`u_additional_info.jobSource` igual a `aws.glue`) e entrega o evento inteiro ao job template, na variável `evento`. Todo o resto é decidido pelo playbook, a partir do arquivo de variáveis, `playbooks/glue-playbooks/vars/restart_glue_job.yml`:
 
 | No arquivo de variáveis | O que define | Valor inicial |
 |---|---|---|
-| `evento_campos` | Em qual campo do evento vem cada dado: incidente, conta, região, job, execução e estado | `number`, `account`, `region`, `jobName`, `jobRunId`, `jobState` |
-| `evento_incidente_tipo` | Se o campo do incidente traz o número ou o `sys_id` | `numero` |
+| `evento_bloco_do_job` | Em qual bloco do evento ficam os dados do job; vazio = na raiz | `u_additional_info` |
+| `evento_campos` | Em qual campo vem cada dado: incidente (na raiz), conta, região, job, execução e estado (no bloco) | `sys_id`, `account`, `region`, `jobName`, `jobRunId`, `jobState` |
+| `evento_incidente_tipo` | Se o campo do incidente traz o `sys_id` ou o número | `sys_id` |
 | `glue_estados_travado` | Estados que a automação trata | `TIMEOUT` |
 | `aws_papel_automacao`, `aws_external_id` | Papel assumido na conta do job | `AJUSTAR` |
 | `aws_regioes_permitidas` | Regiões aceitas; vazio aceita qualquer uma | vazio |
 | `job_elegibilidade` | Quais jobs podem ser reiniciados: `tag`, `lista` ou `todos` | `tag` (`auto-remediacao=sim`) |
 
-Se um dado vier em outro campo, basta trocar o nome em `evento_campos` e dar push: não é preciso mexer no rulebook nem na activation.
+Se um dado vier em outro campo, basta trocar o nome em `evento_campos` e dar push: não é preciso mexer no rulebook nem na activation. O bloco pode chegar como objeto ou como texto JSON; o playbook lê os dois.
 
 **Não há catálogo de contas.** A conta e a região vêm do evento, e o playbook assume o papel `aws_papel_automacao` na conta que vier. O que limita onde a automação age passa a ser: o papel existir na conta e confiar na identidade do AAP, a tag (ou lista) do job e, se preenchida, a lista de regiões. Conta sem o papel recebe a nota "não foi possível assumir o papel" e nada é feito.
 
 Evento com estado fora de `glue_estados_travado` termina sem tocar no incidente. Nos demais casos de recusa (dado ausente ou fora do padrão, job sem a tag, execução que não travou), o motivo fica anotado no incidente. O ID da execução pode vir com o sufixo de nova tentativa (`jr_..._attempt_1`).
 
-Como o Event Stream entrega todos os eventos do Glue, cada um vira um job curto no AAP, mesmo os ignorados. Se o volume incomodar, acrescente o estado à condição do rulebook.
+Cada incidente de job Glue que chegar vira um job curto no AAP, mesmo os ignorados. Se o volume incomodar, acrescente o estado à condição do rulebook.
 
 ### Usar um Event Stream que já recebe os eventos
 
@@ -50,30 +53,42 @@ Dois cuidados:
 
 ### Pontos em aberto
 
-1. **Qual campo liga o evento ao incidente**, e se o incidente já existe quando o evento chega ao EDA. O exemplo de evento recebido não traz esse dado. Quando o nome do campo for conhecido, ele vai em `evento_campos.incidente` (e `evento_incidente_tipo`, se for `sys_id`). Sem ele, o job falha dizendo que o evento não traz o incidente, e nada é feito.
+1. **Confirmar o formato com um evento real.** A leitura acima (dados do job dentro de `u_additional_info`, com `jobSource`, `jobState`, `account`, `region`, `jobName` e `jobRunId`) junta o exemplo de dados recebido com o que o rulebook já existente lê do incidente. A activation de leitura mostra o evento inteiro e tira a dúvida.
 2. **Quais estados entram no restart.** O exemplo recebido é de um job em `FAILED` por erro de instalação de módulo; reiniciar não resolve esse tipo de erro. A pasta sai aceitando só `TIMEOUT`; a lista fica em `glue_estados_travado`.
-3. **Fechamento do incidente.** O playbook grava direto os campos do padrão de fechamento do ambiente (abaixo). Se a regra for passar por um role ou playbook comum de fechamento, troque as tarefas "Resolver o incidente" e "Resolver o incidente como duplicado" por essa chamada.
-4. **Valor de `u_automation_status` quando a automação não resolve.** Só o valor de sucesso foi informado; nos casos de recusa ou falha o playbook anota o motivo no incidente e não grava esse campo.
-5. **Quem envia o evento ao Event Stream** e com qual autenticação.
+3. **O identificador da ação executada** (`sn_u_action_to_be_taken`). O role de fechamento exige esse valor, que é cadastrado na ServiceNow para cada automação. Sem ele o playbook recusa o evento antes de reiniciar o job.
+4. **O nome do papel de automação** (`aws_papel_automacao`): o mesmo papel que os outros playbooks de AWS do repositório assumem, se ele alcançar o Glue.
+5. **De onde vêm o endereço e o token da ServiceNow** no job template: uma credencial que injete as variáveis de ambiente, ou as variáveis `instance_url` e `sn_access_token`.
+6. **Regra própria ou regra no rulebook existente.** Se o ambiente concentra as regras da ServiceNow num único rulebook, o caminho definitivo pode ser uma regra nele, em vez de uma activation separada. A activation separada funciona em paralelo e serve para o desenvolvimento.
 
-### Fechamento do incidente
+### ServiceNow: autenticação e fechamento
 
-Além de estado, código e notas de resolução, o playbook grava os campos de `sn_campos_ao_assumir` e `sn_campos_ao_resolver` (no arquivo de variáveis):
+O playbook fala com a ServiceNow pela Table API, com autenticação Basic por token (`usuário:senha` em base64), no mesmo esquema do role de fechamento do repositório. Ele não usa a coleção `servicenow.itsm`.
 
-| Momento | Campos |
+| Variável | De onde vem |
 |---|---|
-| Ao assumir (*In Progress*) | `assigned_to` (usuário genérico) e a nota de trabalho |
-| Ao resolver | `assigned_to`, `resolved_by`, `u_automation_status` = `SUCESSO`, `u_impact_end` = hora da resolução, com `close_code` = `Solved (Permanently)` |
+| `sn_url` | Variável `instance_url`, ou variável de ambiente `SN_HOST` |
+| `sn_token_basic` | Variável `sn_access_token`, ou variável de ambiente `SN_ACCESS_TOKEN` |
+| `sn_validar_certificado` | `true`; passe para `false` só se o execution environment não confiar no certificado da instância |
+
+O que o playbook grava no incidente:
+
+| Momento | Como |
+|---|---|
+| Recusa, andamento e falha | Nota de trabalho, direto pela API |
+| Ao assumir | Estado *In Progress*, nota de trabalho e, se `sn_usuario_automacao` estiver preenchido, `assigned_to` |
+| Ao resolver | Pelo role indicado em `sn_role_de_fechamento` (valor inicial: `servicenow/encerra_incidente`), que recebe o incidente, o endereço, o token, a ação executada, o responsável, o código e as notas de resolução |
+
+Com `sn_role_de_fechamento` vazio, o playbook resolve direto pela API: estado *Resolved*, código, notas e os campos de `sn_campos_ao_resolver` (`u_automation_status` e `u_impact_end`).
 
 ## Antes de copiar: o que conferir no repositório
 
 São só leituras, na raiz do repositório.
 
-1. **Qual execution environment tem as coleções.** O playbook precisa de `amazon.aws` (9 ou superior), `servicenow.itsm` (2.8 ou superior) e `boto3` no mesmo execution environment. Procure por esses nomes nos arquivos de definição dos execution environments. Se nenhum tiver as duas coleções, peça a inclusão num deles antes de testar.
-2. **O `ansible.cfg`.** Se ele fixar `library`, o módulo pode precisar ir para a pasta indicada ali, em vez de ficar ao lado do playbook.
+1. **O execution environment do job template.** O playbook precisa de `amazon.aws` (9 ou superior) e `boto3`. Procure por esses nomes nos arquivos de definição dos execution environments.
+2. **O `ansible.cfg`.** Se ele fixar `library`, o módulo pode precisar ir para a pasta indicada ali, em vez de ficar ao lado do playbook. Se `roles_path` não incluir a pasta de roles do repositório, o role de fechamento não é encontrado.
 3. **Como os job templates são criados.** Se houver um arquivo de estado desejado por ambiente, aplicado pela esteira, o job template entra por ele, e não pela tela.
-4. **O rulebook que já lê os eventos do mesmo Event Stream**, se houver. Os campos que ele usa mostram onde vem o número do incidente.
-5. **O role de fechamento de incidente**, se houver. Se a regra for fechar por ele, as duas tarefas de resolução do playbook passam a chamá-lo.
+4. **O rulebook que já lê os eventos do mesmo Event Stream**, se houver. Os campos que ele usa mostram onde vêm o incidente e os dados.
+5. **O role de fechamento de incidente.** Confira o nome, as variáveis que ele exige e os valores padrão; o playbook passa `idIncidente`, `instance_url`, `sn_access_token`, `u_action_to_be_taken`, `assigned_to`, `automation_status`, `u_additional_info`, `close_code`, `close_notes` e `work_notes`.
 6. **O que a esteira exige.** Veja os workflows e o nome dos playbooks vizinhos (hífen ou sublinhado, extensão `.yml` ou `.yaml`). Se o lint exigir nome completo de módulo, o módulo precisa ir para a coleção interna.
 
 ## Copiar pelo Git Bash
@@ -104,17 +119,17 @@ Sem Ansible na máquina, a checagem de sintaxe e o lint ficam por conta da estei
 
 Procure por `AJUSTAR` nos arquivos. São estes pontos:
 
-- `playbooks/glue-playbooks/vars/restart_glue_job.yml`: o campo do incidente em `evento_campos`, o papel de automação (`aws_papel_automacao`), o usuário genérico em `sn_campos_ao_assumir` e `sn_campos_ao_resolver`, e o código de resolução para duplicado. Os códigos precisam existir na instância.
+- `playbooks/glue-playbooks/vars/restart_glue_job.yml`: o papel de automação (`aws_papel_automacao`), a ação executada (`sn_u_action_to_be_taken`) e o código de resolução para duplicado. Os códigos precisam existir na instância.
 - `rulebooks/servicenow-glue-aap.yml`: organização e nome do job template.
 
-Enquanto `aws_papel_automacao` estiver com `AJUSTAR`, o playbook recusa qualquer evento e não chama a AWS.
+Enquanto `aws_papel_automacao` ou `sn_u_action_to_be_taken` estiverem com `AJUSTAR`, o playbook recusa qualquer evento, anota o motivo no incidente e não chama a AWS.
 
 ## O que o AAP precisa ter
 
 - Job template apontando para `playbooks/glue-playbooks/restart_glue_job.yml`, com *Prompt on launch* nas variáveis (o rulebook passa a variável `evento`).
-- Credencial da AWS que consiga assumir o papel de automação nas contas dos jobs.
-- Credencial que injete as variáveis de ambiente `SN_HOST` (com `https://`), `SN_USERNAME` e `SN_PASSWORD`. Se a credencial do ambiente usar outros nomes, ajuste os três `lookup` no arquivo de variáveis.
-- Execution environment com `amazon.aws` (9 ou superior), `servicenow.itsm` (2.8 ou superior) e `boto3`; decision environment com `ansible.eda`.
+- Identidade na AWS que consiga assumir o papel de automação nas contas dos jobs: uma credencial *Amazon Web Services* no job template, ou o perfil das máquinas do instance group.
+- Endereço e token da ServiceNow: uma credencial que injete `SN_HOST` (com `https://`) e `SN_ACCESS_TOKEN`, ou as variáveis `instance_url` e `sn_access_token`.
+- Execution environment com `amazon.aws` (9 ou superior) e `boto3`; decision environment com `ansible.eda`.
 - No EDA: Event Stream, credencial do controller e a activation com este rulebook, mapeando a fonte para o Event Stream.
 
 ### Criar esses objetos pela tela
@@ -140,7 +155,7 @@ Pontos de atenção:
 - **Antes de rodar**, a branch precisa estar no Git com o playbook e o rulebook: o AAP sincroniza o repositório e só então cria o job template e a activation.
 - **Login por SSO:** sem senha local, crie um token de API no seu usuário do AAP e passe pela variável `AAP_TOKEN` (`read -rs AAP_TOKEN && export AAP_TOKEN`).
 - **Credencial da AWS e credenciais do repositório** não são criadas pelo script: ele usa as que já existem, pelo nome.
-- **Tipo de credencial da ServiceNow:** criar tipo de credencial exige administrador da plataforma. O tipo que o script cria injeta `SN_HOST` e `SN_INTEGRACAO_SENHA`, e não o usuário: usando o script, escreva o usuário em `sn_integracao_usuario` e troque `SN_PASSWORD` por `SN_INTEGRACAO_SENHA` no arquivo de variáveis.
+- **Credencial da ServiceNow:** o tipo que o script cria injeta `SN_HOST` e a senha em `SN_INTEGRACAO_SENHA`, e não o token Basic que o playbook espera. Usando o script, monte o token em `sn_token_basic`, no arquivo de variáveis, a partir do usuário e dessa senha. Criar tipo de credencial exige administrador da plataforma.
 - **Usuário do EDA:** `EDA_CONTROLLER_USUARIO` é a conta com que o EDA lança o job template. Ela só precisa do papel *Execute* nele; o script tenta conceder e avisa se não conseguir.
 - No fim, o script mostra a URL do Event Stream, que é a que o emissor dos eventos precisa chamar.
 
@@ -158,24 +173,8 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Authorization: errado' -H '
 
 ## Validação feita nesta pasta
 
-Os arquivos desta pasta rodaram no AAP 2.7 do laboratório, numa branch de teste com os valores de lá (papel de automação, usuário e código de resolução do laboratório).
+Esta versão (evento no formato do incidente, ServiceNow por token e fechamento pelo role) passou pelas checagens que não dependem de ambiente: sintaxe do playbook, leitura do evento com o bloco como objeto e como texto JSON, montagem dos campos gravados no incidente e o rulebook carregado no `ansible-rulebook` (só o incidente com `u_additional_info.jobSource` igual a `aws.glue` dispara). O teste no AAP do laboratório desta versão está em andamento.
 
-- **Desenho atual da pasta** (playbook, variáveis e `library/` em `playbooks/glue-playbooks/`, sem `ansible.cfg` próprio e sem `requirements.yml`): conferido no AAP com dois eventos pelo Event Stream. O de estado não tratado foi ignorado; o de uma execução já reiniciada usou o módulo, consultou o Glue e fechou o incidente. Os cenários abaixo rodaram com o mesmo conteúdo no desenho anterior, com o módulo em `plugins/modules/`.
+A versão anterior do mesmo playbook (mesmas etapas de conferência, restart e limite, com a ServiceNow pela coleção `servicenow.itsm`) rodou no AAP 2.7 do laboratório, com Event Stream e activation: restart de um job travado de verdade, recusas, evento repetido, limite de restarts, texto com `{{ }}` no evento e duas activations no mesmo Event Stream.
 
-- **Pelo Event Stream e pela activation**, com eventos no formato do monitoramento:
-  - evento em `FAILED` terminou em "Evento ignorado", sem tocar no incidente;
-  - evento de outra origem não gerou job, e token errado recebeu 403;
-  - texto com `{{ }}` nos campos do evento não foi avaliado: o nome de job com chaves foi recusado, com nota no incidente;
-  - evento de uma execução já reiniciada fechou o incidente como duplicado;
-  - com três restarts na última hora, o quarto foi recusado com a nota do limite.
-- **Caminho principal**, com o job template lançado à mão e a variável `evento`: o job assumiu o incidente, reiniciou um job travado de verdade e resolveu o incidente. A credencial temporária não apareceu no log.
-- **Duas activations no mesmo Event Stream:** uma activation com o `glue-eventos-observar.yml` foi ligada ao Event Stream que outra activation já lia. Um único evento disparou as duas: a primeira lançou o job dela e a de leitura mostrou o evento inteiro no log, sem a credencial do controller. O cabeçalho de autenticação não aparece no log.
-- **Pela linha de comando**, onze cenários contra a AWS e a ServiceNow do laboratório: campos do evento com outros nomes, incidente por `sys_id`, elegibilidade por lista e `todos`, conta sem o papel, região fora da lista, job e execução inexistentes, execução que não travou, papel não preenchido, evento sem o incidente e evento em estado não tratado.
-
-Não foi conferido:
-
-- a gravação de `u_automation_status` e `u_impact_end` e o código `Solved (Permanently)`, que não existem na instância de teste;
-- as variáveis `SN_USERNAME` e `SN_PASSWORD` injetadas por uma credencial do AAP (no laboratório a credencial injeta outros nomes);
-- o roteiro do `_AAP-pela-tela.md` clique a clique: os objetos e campos são os mesmos criados pela API no laboratório, mas a sequência de telas não foi refeita numa console.
-
-O `aap_configurar.sh` foi testado no Git Bash contra um AAP simulado e contra o AAP 2.7 do laboratório (criação de um conjunto completo de objetos, segunda execução e rulebook alterado). Não foram exercitados num AAP de verdade: a autenticação por `AAP_TOKEN`, a concessão do papel *Execute* a um usuário próprio do EDA, o uso de credenciais de repositório e a execução com um usuário que não seja administrador.
+O `aap_configurar.sh` foi testado no Git Bash contra um AAP simulado e contra o AAP 2.7 do laboratório.

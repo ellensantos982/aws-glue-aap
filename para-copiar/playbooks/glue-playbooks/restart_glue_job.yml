@@ -1,9 +1,9 @@
 ---
-# Acionado pelo EDA quando chega o evento de um job Glue.
-# Lê do evento a conta, a região, o job, a execução e o incidente (os nomes dos campos ficam em
-# vars/restart_glue_job.yml), assume o papel de automação na conta do job, confere que a execução travou de
-# fato, reinicia o job e resolve o incidente com o resultado. Não para nem reinicia nada além
-# dessa execução, e qualquer falha no caminho fica anotada no incidente.
+# Acionado pelo EDA quando chega o evento de um incidente de job Glue.
+# Lê do evento o incidente e os dados do job (os nomes dos campos ficam em
+# vars/restart_glue_job.yml), assume o papel de automação na conta do job, confere que a
+# execução travou de fato, reinicia o job e resolve o incidente com o resultado. Não para nem
+# reinicia nada além dessa execução, e qualquer falha no caminho fica anotada no incidente.
 - name: Reiniciar job Glue travado
   hosts: localhost
   connection: local
@@ -12,31 +12,43 @@
     - vars/restart_glue_job.yml
   vars:
     # O rulebook passa o evento inteiro na variável "evento". Para lançar o job à mão, informe
-    # "evento" com os mesmos campos. Só os campos citados em evento_campos (arquivo de variáveis) são lidos.
+    # "evento" com os mesmos campos. Só os campos citados em evento_campos são lidos.
     ev: "{{ evento | default({}) }}"
+    # Os dados do job podem vir num bloco dentro do evento (evento_bloco_do_job), como objeto ou como texto JSON
+    bloco: "{{ ev[evento_bloco_do_job] | default({}, true) if evento_bloco_do_job | default('', true) | length > 0 else ev }}"
+    dados: "{{ (bloco | from_json) if bloco is string else bloco }}"
     incidente_ref: "{{ ev[evento_campos.incidente] | default('', true) | string | trim }}"
-    conta_id: "{{ ev[evento_campos.conta] | default('', true) | string | trim }}"
-    regiao: "{{ ev[evento_campos.regiao] | default('', true) | string | trim }}"
-    job_name: "{{ ev[evento_campos.job] | default('', true) | string }}"
-    run_travado: "{{ ev[evento_campos.execucao] | default('', true) | string | trim }}"
-    estado_evento: "{{ ev[evento_campos.estado] | default('', true) | string | trim }}"
-    # O campo do incidente traz o número (INC...) ou o sys_id, conforme evento_incidente_tipo
-    por_sys_id: "{{ evento_incidente_tipo | default('numero') == 'sys_id' }}"
-    sn_instancia:
-      host: "{{ sn_host }}"
-      username: "{{ sn_integracao_usuario }}"
-      password: "{{ sn_integracao_senha }}"
+    conta_id: "{{ dados[evento_campos.conta] | default('', true) | string | trim }}"
+    regiao: "{{ dados[evento_campos.regiao] | default('', true) | string | trim }}"
+    job_name: "{{ dados[evento_campos.job] | default('', true) | string }}"
+    run_travado: "{{ dados[evento_campos.execucao] | default('', true) | string | trim }}"
+    estado_evento: "{{ dados[evento_campos.estado] | default('', true) | string | trim }}"
+    # O campo do incidente traz o sys_id ou o número (INC...), conforme evento_incidente_tipo
+    por_sys_id: "{{ evento_incidente_tipo | default('sys_id') == 'sys_id' }}"
+    fechar_pelo_role: "{{ sn_role_de_fechamento | default('', true) | length > 0 }}"
+    responsavel: "{{ {'assigned_to': sn_usuario_automacao} if sn_usuario_automacao | default('', true) | length > 0 else {} }}"
 
-  # Todas as chamadas ao Glue usam a região do job e a credencial temporária do papel assumido.
-  # O default('') é para o ansible-core 2.16, que avalia isto já nas tarefas anteriores ao
-  # assume role; o Glue só é chamado depois dele.
   module_defaults:
+    # Todas as chamadas ao Glue usam a região do job e a credencial temporária do papel assumido.
+    # O default('') é para o ansible-core 2.16, que avalia isto já nas tarefas anteriores ao
+    # assume role; o Glue só é chamado depois dele.
     glue_job_run:
       region: "{{ regiao }}"
       access_key: "{{ sessao.sts_creds.access_key | default('') }}"
       secret_key: "{{ sessao.sts_creds.secret_key | default('') }}"
       session_token: "{{ sessao.sts_creds.session_token | default('') }}"
       profile: ""     # anula um AWS_PROFILE do ambiente, que conflita com a credencial temporária
+    # As tarefas deste playbook que falam com a ServiceNow atualizam o incidente do evento:
+    # cada uma só informa os campos (body). A consulta inicial troca o método e o endereço.
+    ansible.builtin.uri:
+      url: "{{ sn_endereco | default('') }}/api/now/table/incident/{{ incidente_sys_id | default('') }}"
+      method: PATCH
+      headers:
+        Authorization: "Basic {{ sn_token | default('') }}"
+        Accept: application/json
+      body_format: json
+      validate_certs: "{{ sn_validar_certificado | default(true) }}"
+      status_code: 200
 
   tasks:
     # O Event Stream pode receber eventos de qualquer estado: os que a automação não trata
@@ -61,6 +73,36 @@
           O campo "{{ evento_campos.incidente }}" do evento não traz
           {{ 'um sys_id' if por_sys_id else 'um número de incidente' }} válido: nada foi feito.
         quiet: true
+
+    # Endereço e token são fixados uma vez, para valerem iguais em todas as chamadas (inclusive
+    # dentro do role de fechamento).
+    - name: Fixar o endereço e o token da ServiceNow
+      ansible.builtin.set_fact:
+        sn_endereco: "{{ sn_url }}"
+        sn_token: "{{ sn_token_basic }}"
+      no_log: true
+
+    - name: Conferir o endereço e o token da ServiceNow
+      ansible.builtin.assert:
+        that:
+          - sn_endereco is match('https://')
+          - sn_token | length > 0
+        fail_msg: "Endereço (https://...) ou token da ServiceNow ausente nas variáveis ou na credencial: nada foi feito."
+        quiet: true
+
+    - name: Localizar o incidente
+      ansible.builtin.uri:
+        url: >-
+          {{ sn_endereco }}/api/now/table/incident?sysparm_query={{ 'sys_id' if por_sys_id else 'number' }}={{
+          incidente_ref }}&sysparm_fields=sys_id,number&sysparm_limit=1
+        method: GET
+      register: consulta
+      failed_when: consulta.status | default(0) != 200 or consulta.json.result | default([]) | length != 1
+
+    - name: Guardar o incidente
+      ansible.builtin.set_fact:
+        incidente_sys_id: "{{ consulta.json.result[0].sys_id }}"
+        incidente_numero: "{{ consulta.json.result[0].number }}"
 
     - name: Conferir os dados do evento
       ansible.builtin.set_fact:
@@ -88,13 +130,18 @@
             motivo: "a elegibilidade é por tag, mas job_tag_chave ou job_tag_valor está vazio"
           - falhou: "{{ job_elegibilidade | default('') == 'lista' and job_name not in jobs_permitidos | default([], true) }}"
             motivo: "o job {{ job_name }} não está em jobs_permitidos"
+          # Sem a ação preenchida o role de fechamento não fecha: melhor recusar antes de reiniciar o job
+          - falhou: >-
+              {{ fechar_pelo_role and
+                 (sn_u_action_to_be_taken | default('', true) | length == 0 or sn_u_action_to_be_taken is search('AJUSTAR')) }}
+            motivo: "a ação executada (sn_u_action_to_be_taken) não está preenchida nas variáveis"
 
     - name: Tratar o incidente
       block:
         - name: Assumir o papel de automação na conta do job
           amazon.aws.sts_assume_role:
             role_arn: "arn:aws:iam::{{ conta_id }}:role/{{ aws_papel_automacao }}"
-            role_session_name: "aap-{{ incidente_ref }}"
+            role_session_name: "aap-{{ incidente_numero }}"
             external_id: "{{ aws_external_id | default(omit, true) }}"
             duration_seconds: 3600
             region: "{{ regiao }}"
@@ -162,18 +209,34 @@
 
         - name: Encerrar como duplicado
           when: ja_reiniciado.count | default(0) | int > 0
+          vars:
+            nota_duplicado: >-
+              A execução travada {{ travada.job_run.Id }} já foi tratada: o job foi reiniciado pelo Ansible
+              ({{ ja_reiniciado.execucoes | map(attribute='id') | join(', ') }}). Nada a fazer.
           block:
             - name: Resolver o incidente como duplicado
-              servicenow.itsm.incident:
-                instance: "{{ sn_instancia }}"
-                number: "{{ omit if por_sys_id else incidente_ref }}"
-                sys_id: "{{ incidente_ref if por_sys_id else omit }}"
-                state: resolved
+              ansible.builtin.uri:
+                body: >-
+                  {{ sn_campos_ao_resolver | default({}) | combine(responsavel)
+                     | combine({'resolved_by': sn_usuario_automacao} if responsavel else {})
+                     | combine({'state': '6', 'close_code': sn_close_code_duplicado, 'close_notes': nota_duplicado}) }}
+              when: not fechar_pelo_role
+
+            - name: Resolver o incidente como duplicado pelo role de fechamento
+              ansible.builtin.include_role:
+                name: "{{ sn_role_de_fechamento }}"
+              vars:
+                idIncidente: "{{ incidente_sys_id }}"                     # noqa: var-naming[pattern]
+                instance_url: "{{ sn_endereco }}"
+                sn_access_token: "{{ sn_token }}"
+                u_action_to_be_taken: "{{ sn_u_action_to_be_taken }}"
+                assigned_to: "{{ sn_usuario_automacao | default(incident_assigned_to, true) }}"
+                automation_status: "{{ sn_status_automacao }}"
+                u_additional_info: "{{ dados }}"
                 close_code: "{{ sn_close_code_duplicado }}"
-                close_notes: >-
-                  A execução travada {{ travada.job_run.Id }} já foi tratada: o job foi reiniciado pelo Ansible
-                  ({{ ja_reiniciado.execucoes | map(attribute='id') | join(', ') }}). Nada a fazer.
-                other: "{{ sn_campos_ao_resolver | default({}) }}"
+                close_notes: "{{ nota_duplicado }}"
+                work_notes: "{{ nota_duplicado }}"
+              when: fechar_pelo_role
 
             - name: Parar aqui
               ansible.builtin.meta: end_play
@@ -200,16 +263,13 @@
           when: motivo_recusa | length > 0
           block:
             - name: Anotar no incidente
-              servicenow.itsm.incident:
-                instance: "{{ sn_instancia }}"
-                number: "{{ omit if por_sys_id else incidente_ref }}"
-                sys_id: "{{ incidente_ref if por_sys_id else omit }}"
-                other:
+              ansible.builtin.uri:
+                body:
                   work_notes: "A automação não atuou: {{ motivo_recusa }}. Encaminhar para a sustentação."
 
             - name: Interromper
               ansible.builtin.fail:
-                msg: "Incidente {{ incidente_ref }}: {{ motivo_recusa }}"
+                msg: "Incidente {{ incidente_numero }}: {{ motivo_recusa }}"
 
         - name: Contar os restarts recentes do job
           glue_job_run:
@@ -224,11 +284,8 @@
           when: restarts.count | int >= max_restarts | int
           block:
             - name: Anotar no incidente
-              servicenow.itsm.incident:
-                instance: "{{ sn_instancia }}"
-                number: "{{ omit if por_sys_id else incidente_ref }}"
-                sys_id: "{{ incidente_ref if por_sys_id else omit }}"
-                other:
+              ansible.builtin.uri:
+                body:
                   work_notes: >-
                     O job já foi reiniciado {{ restarts.count }} vezes na última {{ janela_restarts_horas }} h (limite {{ max_restarts }}).
                     A automação não vai reiniciar de novo: encaminhar para a sustentação.
@@ -238,13 +295,9 @@
                 msg: "Limite de restarts atingido para {{ job_name }}"
 
         - name: Assumir o incidente
-          servicenow.itsm.incident:
-            instance: "{{ sn_instancia }}"
-            number: "{{ omit if por_sys_id else incidente_ref }}"
-            sys_id: "{{ incidente_ref if por_sys_id else omit }}"
-            state: in_progress
-            other: >-
-              {{ sn_campos_ao_assumir | default({}) | combine({'work_notes':
+          ansible.builtin.uri:
+            body: >-
+              {{ responsavel | combine({'state': '2', 'work_notes':
                  'Ansible recebeu o incidente pelo Event-Driven Ansible. Reiniciando o job ' ~ job_name ~ '.'}) }}
 
         # Com glue_estados_travado só em TIMEOUT a execução já terminou e nada é parado. Se um dia a
@@ -266,11 +319,8 @@
           register: novo
 
         - name: Avisar no incidente que o job foi reiniciado
-          servicenow.itsm.incident:
-            instance: "{{ sn_instancia }}"
-            number: "{{ omit if por_sys_id else incidente_ref }}"
-            sys_id: "{{ incidente_ref if por_sys_id else omit }}"
-            other:
+          ansible.builtin.uri:
+            body:
               work_notes: >-
                 {{ (parada is not skipped) | ternary('Execução travada ' ~ travada.job_run.Id ~ ' parada. ', '') }}Job reiniciado:
                 nova execução {{ novo.run_id }}. Aguardando o término.
@@ -287,17 +337,35 @@
           failed_when: final.job_run is not defined
 
         - name: Resolver o incidente
-          servicenow.itsm.incident:
-            instance: "{{ sn_instancia }}"
-            number: "{{ omit if por_sys_id else incidente_ref }}"
-            sys_id: "{{ incidente_ref if por_sys_id else omit }}"
-            state: resolved
-            close_code: "{{ sn_close_code }}"
-            close_notes: >-
+          when: final.job_run.JobRunState == 'SUCCEEDED'
+          vars:
+            nota_resolucao: >-
               Job {{ job_name }} reiniciado automaticamente pelo Ansible (Event-Driven Ansible).
               Execução {{ novo.run_id }} concluída com sucesso em {{ final.job_run.ExecutionTime | default('?') }} s.
-            other: "{{ sn_campos_ao_resolver | default({}) }}"
-          when: final.job_run.JobRunState == 'SUCCEEDED'
+          block:
+            - name: Resolver o incidente pela API
+              ansible.builtin.uri:
+                body: >-
+                  {{ sn_campos_ao_resolver | default({}) | combine(responsavel)
+                     | combine({'resolved_by': sn_usuario_automacao} if responsavel else {})
+                     | combine({'state': '6', 'close_code': sn_close_code, 'close_notes': nota_resolucao}) }}
+              when: not fechar_pelo_role
+
+            - name: Resolver o incidente pelo role de fechamento
+              ansible.builtin.include_role:
+                name: "{{ sn_role_de_fechamento }}"
+              vars:
+                idIncidente: "{{ incidente_sys_id }}"                     # noqa: var-naming[pattern]
+                instance_url: "{{ sn_endereco }}"
+                sn_access_token: "{{ sn_token }}"
+                u_action_to_be_taken: "{{ sn_u_action_to_be_taken }}"
+                assigned_to: "{{ sn_usuario_automacao | default(incident_assigned_to, true) }}"
+                automation_status: "{{ sn_status_automacao }}"
+                u_additional_info: "{{ dados }}"
+                close_code: "{{ sn_close_code }}"
+                close_notes: "{{ nota_resolucao }}"
+                work_notes: "{{ nota_resolucao }}"
+              when: fechar_pelo_role
 
         - name: Registrar que o restart não resolveu
           when: final.job_run.JobRunState != 'SUCCEEDED'
@@ -306,11 +374,8 @@
             terminou: "{{ final.job_run.JobRunState in ['FAILED', 'TIMEOUT', 'STOPPED', 'ERROR'] }}"
           block:
             - name: Anotar no incidente
-              servicenow.itsm.incident:
-                instance: "{{ sn_instancia }}"
-                number: "{{ omit if por_sys_id else incidente_ref }}"
-                sys_id: "{{ incidente_ref if por_sys_id else omit }}"
-                other:
+              ansible.builtin.uri:
+                body:
                   work_notes: >-
                     {{ 'O restart (execução ' ~ novo.run_id ~ ') terminou em ' ~ estado ~ ': ' ~ final.job_run.ErrorMessage | default('sem mensagem')
                        if terminou | bool
@@ -325,11 +390,8 @@
       # o incidente recebe a nota. As interrupções acima (fail) já deixaram a sua própria nota.
       rescue:
         - name: Anotar a falha no incidente
-          servicenow.itsm.incident:
-            instance: "{{ sn_instancia }}"
-            number: "{{ omit if por_sys_id else incidente_ref }}"
-            sys_id: "{{ incidente_ref if por_sys_id else omit }}"
-            other:
+          ansible.builtin.uri:
+            body:
               work_notes: >-
                 A automação falhou na etapa "{{ ansible_failed_task.name }}":
                 {{ ansible_failed_result.msg | default('sem mensagem') | string | truncate(600) }}.

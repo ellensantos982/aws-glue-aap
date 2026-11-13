@@ -14,14 +14,12 @@ Se os job templates do ambiente são criados por código (um arquivo de estado d
 
 ## Parte 1: Automation Execution
 
-### 1. Credencial da ServiceNow
+### 1. Endereço e token da ServiceNow
 
-O playbook lê três variáveis de ambiente: `SN_HOST` (com `https://`), `SN_USERNAME` e `SN_PASSWORD`.
+O playbook precisa do endereço da instância e de um token de autenticação Basic (`usuário:senha` em base64). Ele lê os dois das variáveis `instance_url` e `sn_access_token` ou, na falta delas, das variáveis de ambiente `SN_HOST` e `SN_ACCESS_TOKEN`.
 
-- **Se o ambiente já tem uma credencial da ServiceNow:** use essa. Abra o tipo dela em *Automation Execution → Infrastructure → Credential Types* e veja quais variáveis ela injeta. Se os nomes forem outros, troque os três `lookup` de `sn_host`, `sn_integracao_usuario` e `sn_integracao_senha` no arquivo de variáveis.
+- **Se o ambiente já tem uma credencial que injeta o token** (a que os playbooks de ServiceNow do repositório usam): use essa no job template. Abra o tipo dela em *Automation Execution → Infrastructure → Credential Types* e confira os nomes das variáveis; se forem outros, troque `sn_url` e `sn_token_basic` no arquivo de variáveis.
 - **Se não tem:** crie o tipo e a credencial. Criar tipo de credencial exige administrador da plataforma; se o botão não aparecer, peça a criação com os dois blocos abaixo.
-
-*Automation Execution → Infrastructure → Credential Types → Create credential type*
 
 Input configuration:
 
@@ -30,17 +28,13 @@ fields:
   - id: sn_host
     type: string
     label: Instancia (https://...)
-  - id: sn_usuario
+  - id: sn_token
     type: string
-    label: Usuario de integracao
-  - id: sn_senha
-    type: string
-    label: Senha
+    label: Token Basic (usuario:senha em base64)
     secret: true
 required:
   - sn_host
-  - sn_usuario
-  - sn_senha
+  - sn_token
 ```
 
 Injector configuration:
@@ -48,15 +42,12 @@ Injector configuration:
 ```yaml
 env:
   SN_HOST: '{{ sn_host }}'
-  SN_USERNAME: '{{ sn_usuario }}'
-  SN_PASSWORD: '{{ sn_senha }}'
+  SN_ACCESS_TOKEN: '{{ sn_token }}'
 ```
 
-Depois, *Automation Execution → Infrastructure → Credentials → Create credential*: nome, organização, o tipo acima e os três valores.
+### 2. Identidade na AWS
 
-### 2. Credencial da AWS *(se não existir)*
-
-Tipo *Amazon Web Services*. Ela só precisa conseguir assumir o papel de `aws_papel_automacao` nas contas dos jobs. Normalmente já existe uma no ambiente; anote o nome.
+O playbook assume o papel de `aws_papel_automacao` na conta do job. Para isso o job precisa de uma identidade na AWS: uma credencial do tipo *Amazon Web Services* no job template, ou o perfil das máquinas do instance group em que o job roda. Veja como os outros job templates de AWS do ambiente fazem e repita.
 
 ### 3. Projeto
 
@@ -93,8 +84,9 @@ ansible_python_interpreter: '{{ ansible_playbook_python }}'
 | Inventory | o do passo 4 |
 | Project | o do passo 3 |
 | Playbook | `playbooks/glue-playbooks/restart_glue_job.yml` |
-| Execution environment | um com `amazon.aws`, `servicenow.itsm` e `boto3` |
-| Credentials | a da AWS **e** a da ServiceNow |
+| Execution environment | um com `amazon.aws` e `boto3` |
+| Credentials | a da ServiceNow (passo 1) e, se for o caso, a da AWS (passo 2) |
+| Instance groups | o mesmo dos outros job templates de AWS, se o ambiente usar |
 | Extra variables | marque **Prompt on launch** |
 
 O *Prompt on launch* das variáveis é obrigatório: sem ele o AAP descarta a variável `evento` que o EDA envia, e o playbook para dizendo que o evento não traz o incidente.
@@ -105,8 +97,9 @@ Lance o job template à mão (*Launch template*) com estas variáveis:
 
 ```yaml
 evento:
-  jobSource: aws.glue
-  jobState: FAILED
+  u_additional_info:
+    jobSource: aws.glue
+    jobState: FAILED
 ```
 
 O job deve terminar com sucesso em segundos, com a mensagem "Evento ignorado: estado FAILED". Isso prova que projeto, execution environment e variáveis estão certos, sem tocar na AWS nem na ServiceNow.
@@ -157,7 +150,7 @@ A activation guarda uma cópia do rulebook. Se o rulebook mudar no Git (organiza
 1. **Activation:** em *Rulebook Activations*, abra a activation; a aba *History* mostra o log.
 2. **Evento de teste:** peça um evento de teste ao emissor, ou envie um pelo Git Bash se tiver o token do Event Stream:
    ```bash
-   curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Authorization: Bearer TOKEN' -H 'Content-Type: application/json' -d '{"jobSource": "aws.glue", "jobState": "FAILED"}' 'URL-DO-EVENT-STREAM'
+   curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Authorization: Bearer TOKEN' -H 'Content-Type: application/json' -d '{"u_additional_info": {"jobSource": "aws.glue", "jobState": "FAILED"}}' 'URL-DO-EVENT-STREAM'
    ```
    O esperado é `200`, e em seguida um job novo em *Automation Execution → Jobs*, terminando com "Evento ignorado". Com token errado, o esperado é `403`.
 3. **Regra disparada:** *Automation Decisions → Rule Audit* lista cada disparo e o job lançado.
@@ -166,9 +159,11 @@ A activation guarda uma cópia do rulebook. Se o rulebook mudar no Git (organiza
 
 | Sintoma | Causa provável |
 |---|---|
-| O evento chega (200) e nenhum job aparece | O evento não tem `jobSource` igual a `aws.glue`, ou a organização ou o nome do job template no rulebook não batem com o AAP (veja o log da activation) |
-| Job falha com "O campo ... não traz um número de incidente válido" | Falta o *Prompt on launch* das variáveis no job template, ou o campo do incidente tem outro nome (`evento_campos.incidente` no arquivo de variáveis) |
+| O evento chega (200) e nenhum job aparece | O evento não tem `u_additional_info.jobSource` igual a `aws.glue`, ou a organização ou o nome do job template no rulebook não batem com o AAP (veja o log da activation) |
+| Job falha com "O campo ... não traz um sys_id válido" | Falta o *Prompt on launch* das variáveis no job template, ou o campo do incidente tem outro nome (`evento_campos.incidente` no arquivo de variáveis) |
 | Job termina em "Evento ignorado" | O estado do evento não está em `glue_estados_travado` |
 | Nota no incidente: "não foi possível assumir o papel" | O papel não existe na conta do job, ou não confia na identidade da credencial da AWS |
-| Job falha ao falar com a ServiceNow | Credencial da ServiceNow fora do job template, ou injetando variáveis com outros nomes |
+| Job falha em "Conferir o endereço e o token da ServiceNow" | A credencial não está no job template, ou injeta variáveis com outros nomes |
+| Job falha em "Localizar o incidente" | Token sem acesso, certificado não confiável (`sn_validar_certificado`) ou incidente inexistente |
+| Nota no incidente: "a ação executada ... não está preenchida" | Falta `sn_u_action_to_be_taken` no arquivo de variáveis |
 | Módulo `glue_job_run` não encontrado | A pasta `library/` não foi junto com o playbook: ela precisa ficar ao lado dele, em `playbooks/glue-playbooks/library/` |

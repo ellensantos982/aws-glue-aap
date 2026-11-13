@@ -3,17 +3,18 @@
 # para ajustar, basta alterar aqui e dar push (o AAP atualiza o projeto ao lançar o job).
 
 # ---------- Evento ----------
-# Nome, no evento, de cada campo que o playbook usa. Se o evento trouxer o dado num campo
-# com outro nome, troque só o lado direito.
+# O evento é o incidente da ServiceNow: o identificador do incidente fica na raiz do evento, e os
+# dados do job ficam num bloco dentro dele. Se algum dado vier com outro nome, troque só o lado direito.
+evento_bloco_do_job: u_additional_info   # vazio = os dados do job também ficam na raiz do evento
 evento_campos:
-  incidente: number        # AJUSTAR: campo que traz o incidente (o exemplo de evento não traz)
-  conta: account
+  incidente: sys_id        # na raiz do evento
+  conta: account           # daqui para baixo, dentro do bloco
   regiao: region
   job: jobName
   execucao: jobRunId
   estado: jobState
-# O que o campo do incidente traz: numero (ex.: INC0012345) ou sys_id (32 caracteres hexadecimais)
-evento_incidente_tipo: numero
+# O que o campo do incidente traz: sys_id (32 caracteres hexadecimais) ou numero (ex.: INC0012345)
+evento_incidente_tipo: sys_id
 
 # Estados que a automação trata. Evento com outro estado termina sem tocar no incidente.
 # A execução também é conferida no Glue: só é reiniciada se estiver mesmo num destes estados.
@@ -42,25 +43,29 @@ janela_restarts_horas: 1
 espera_restart_segundos: 900
 
 # ---------- ServiceNow ----------
-# Endereço, usuário e senha vêm de variáveis de ambiente, injetadas pela credencial do AAP.
-# Os nomes abaixo são os que a coleção servicenow.itsm usa por padrão; se a credencial do
-# ambiente injetar outros nomes, troque aqui. Para fixar o usuário, escreva o nome no lugar do lookup.
-sn_host: "{{ lookup('ansible.builtin.env', 'SN_HOST') | regex_replace('/$', '') }}"
-sn_integracao_usuario: "{{ lookup('ansible.builtin.env', 'SN_USERNAME') }}"
-sn_integracao_senha: "{{ lookup('ansible.builtin.env', 'SN_PASSWORD') }}"
+# Endereço da instância e token de autenticação Basic (usuário:senha em base64), no mesmo esquema
+# do role de fechamento: variável instance_url / sn_access_token, ou as variáveis de ambiente abaixo.
+sn_url: "{{ instance_url | default(lookup('ansible.builtin.env', 'SN_HOST'), true) | regex_replace('/$', '') }}"
+sn_token_basic: "{{ sn_access_token | default(lookup('ansible.builtin.env', 'SN_ACCESS_TOKEN'), true) | trim }}"
+# AJUSTAR para false só se o execution environment não confiar no certificado da instância
+sn_validar_certificado: true
+
+# Usuário da automação (sys_id), gravado em assigned_to ao assumir o incidente. Vazio = não grava;
+# no fechamento pelo role, vazio usa o usuário padrão do próprio role.
+sn_usuario_automacao: ""
+
+# Fechamento: pelo role do repositório (padrão do ambiente) ou, com o valor vazio, direto pela API.
+sn_role_de_fechamento: servicenow/encerra_incidente
+# Exigido pelo role de fechamento: o identificador da ação executada, cadastrado na ServiceNow
+sn_u_action_to_be_taken: AJUSTAR-acao-executada
+sn_status_automacao: SUCESSO
 
 # Códigos de resolução: precisam existir na instância
 sn_close_code: Solved (Permanently)
 sn_close_code_duplicado: Duplicate      # AJUSTAR se a instância usar outro código para duplicado
 
-# Campos gravados no incidente além de estado, código e notas, no padrão de fechamento do ambiente.
-# AJUSTAR-usuario-generico: o usuário genérico da automação, no formato que a instância aceita
-# (sys_id ou nome de usuário). Para não gravar um campo, apague a linha dele.
-sn_campos_ao_assumir:
-  assigned_to: AJUSTAR-usuario-generico
+# Só no fechamento direto pela API: campos gravados além de estado, código e notas
 sn_campos_ao_resolver:
-  assigned_to: AJUSTAR-usuario-generico
-  resolved_by: AJUSTAR-usuario-generico
-  u_automation_status: SUCESSO
+  u_automation_status: "{{ sn_status_automacao }}"
   # Horário de normalização do impacto: a hora em que a automação resolveu
   u_impact_end: "{{ now(fmt='%Y-%m-%d %H:%M:%S') }}"
