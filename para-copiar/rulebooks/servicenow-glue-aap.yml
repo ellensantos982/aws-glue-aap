@@ -2,7 +2,8 @@
 # Rulebook activation ligada a um Event Stream do AAP, que recebe os eventos do monitoramento de jobs.
 # O rulebook só separa os eventos do Glue e entrega o evento inteiro ao job template, na variável
 # "evento". Quais campos são lidos, quais estados são tratados e todas as outras regras ficam nas
-# variáveis do playbook (playbooks/vars/vars.yml): ajustar não exige mexer aqui nem recriar a activation.
+# variáveis do playbook (playbooks/glue-playbooks/vars/restart_glue_job.yml): ajustar não exige mexer
+# aqui nem recriar a activation.
 # A fonte abaixo é substituída pelo Event Stream no mapeamento de fontes da activation.
 - name: Evento de job Glue -> EDA -> restart
   hosts: all
@@ -17,7 +18,7 @@
       action:
         run_job_template:
           organization: "AJUSTAR-organizacao"       # organização do job template no AAP
-          name: "AJUSTAR-nome-do-job-template"      # job template que roda playbooks/restart_glue_job.yml
+          name: "AJUSTAR-nome-do-job-template"      # job template que roda o restart_glue_job.yml
           job_args:
             extra_vars:
               evento: "{{ event.payload }}"

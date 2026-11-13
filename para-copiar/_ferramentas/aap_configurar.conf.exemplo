@@ -20,7 +20,7 @@ REPO_BRANCH=develop
 REPO_CREDENCIAL_CONTROLLER=
 REPO_CREDENCIAL_EDA=
 # Caminho do playbook dentro do repositório. Lab: restart_glue_job.yml
-PLAYBOOK=playbooks/restart_glue_job.yml
+PLAYBOOK=playbooks/glue-playbooks/restart_glue_job.yml
 # Nome do arquivo dentro da pasta rulebooks/
 RULEBOOK=servicenow-glue-aap.yml
 

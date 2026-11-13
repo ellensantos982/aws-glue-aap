@@ -836,9 +836,9 @@ fi
 echo "O rulebook precisa citar a organização '$AAP_ORGANIZACAO' e o job template '$NOME_JOB_TEMPLATE'."
 ````
 
-## para-copiar/plugins/modules/glue_job_run.py
+## para-copiar/playbooks/glue-playbooks/library/glue_job_run.py
 
-<!-- arquivo: para-copiar/plugins/modules/glue_job_run.py | interpretador: python -->
+<!-- arquivo: para-copiar/playbooks/glue-playbooks/library/glue_job_run.py | interpretador: python -->
 ````python
 # -*- coding: utf-8 -*-
 # Módulo local: as coleções amazon.aws/community.aws criam o job Glue,

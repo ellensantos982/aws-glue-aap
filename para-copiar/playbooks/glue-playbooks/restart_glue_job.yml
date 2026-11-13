@@ -1,7 +1,7 @@
 ---
 # Acionado pelo EDA quando chega o evento de um job Glue.
 # Lê do evento a conta, a região, o job, a execução e o incidente (os nomes dos campos ficam em
-# vars/vars.yml), assume o papel de automação na conta do job, confere que a execução travou de
+# vars/restart_glue_job.yml), assume o papel de automação na conta do job, confere que a execução travou de
 # fato, reinicia o job e resolve o incidente com o resultado. Não para nem reinicia nada além
 # dessa execução, e qualquer falha no caminho fica anotada no incidente.
 - name: Reiniciar job Glue travado
@@ -9,10 +9,10 @@
   connection: local
   gather_facts: false
   vars_files:
-    - vars/vars.yml
+    - vars/restart_glue_job.yml
   vars:
     # O rulebook passa o evento inteiro na variável "evento". Para lançar o job à mão, informe
-    # "evento" com os mesmos campos. Só os campos citados em evento_campos (vars.yml) são lidos.
+    # "evento" com os mesmos campos. Só os campos citados em evento_campos (arquivo de variáveis) são lidos.
     ev: "{{ evento | default({}) }}"
     incidente_ref: "{{ ev[evento_campos.incidente] | default('', true) | string | trim }}"
     conta_id: "{{ ev[evento_campos.conta] | default('', true) | string | trim }}"

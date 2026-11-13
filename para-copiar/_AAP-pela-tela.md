@@ -4,11 +4,13 @@ Roteiro para criar os objetos do AAP pela console web, sem API e sem token. Os n
 
 Antes de começar:
 
-- A branch com `playbooks/`, `plugins/` e `rulebooks/` já está no Git, com o `vars.yml` e o rulebook preenchidos.
+- A branch com `playbooks/glue-playbooks/` e `rulebooks/` já está no Git, com o arquivo de variáveis (`playbooks/glue-playbooks/vars/restart_glue_job.yml`) e o rulebook preenchidos.
 - Tenha em mãos: a organização, o nome do execution environment e do decision environment, e a credencial do repositório (se ele for privado).
 - Escolha o nome do job template agora: ele precisa ser **idêntico** ao que está no rulebook (`name:`), assim como a organização.
 
 Os objetos marcados com *(se não existir)* costumam já existir no ambiente. Nesse caso, use o que existe.
+
+Se os job templates do ambiente são criados por código (um arquivo de estado desejado aplicado pela esteira), o job template do passo 5 entra por lá, e não pela tela. Os campos são os mesmos da tabela do passo 5.
 
 ## Parte 1: Automation Execution
 
@@ -16,7 +18,7 @@ Os objetos marcados com *(se não existir)* costumam já existir no ambiente. Ne
 
 O playbook lê três variáveis de ambiente: `SN_HOST` (com `https://`), `SN_USERNAME` e `SN_PASSWORD`.
 
-- **Se o ambiente já tem uma credencial da ServiceNow:** use essa. Abra o tipo dela em *Automation Execution → Infrastructure → Credential Types* e veja quais variáveis ela injeta. Se os nomes forem outros, troque os três `lookup` de `sn_host`, `sn_integracao_usuario` e `sn_integracao_senha` no `vars.yml`.
+- **Se o ambiente já tem uma credencial da ServiceNow:** use essa. Abra o tipo dela em *Automation Execution → Infrastructure → Credential Types* e veja quais variáveis ela injeta. Se os nomes forem outros, troque os três `lookup` de `sn_host`, `sn_integracao_usuario` e `sn_integracao_senha` no arquivo de variáveis.
 - **Se não tem:** crie o tipo e a credencial. Criar tipo de credencial exige administrador da plataforma; se o botão não aparecer, peça a criação com os dois blocos abaixo.
 
 *Automation Execution → Infrastructure → Credential Types → Create credential type*
@@ -69,7 +71,7 @@ Tipo *Amazon Web Services*. Ela só precisa conseguir assumir o papel de `aws_pa
 | Source control credential | a do repositório, se for privado |
 | Options | marque **Update revision on launch** |
 
-Salve e espere o status *Successful*. Com essa opção, toda alteração no `vars.yml` vale no job seguinte, sem sincronizar à mão.
+Salve e espere o status *Successful*. Com essa opção, toda alteração no arquivo de variáveis vale no job seguinte, sem sincronizar à mão.
 
 ### 4. Inventário *(se não existir um com `localhost`)*
 
@@ -90,7 +92,7 @@ ansible_python_interpreter: '{{ ansible_playbook_python }}'
 | Job type | Run |
 | Inventory | o do passo 4 |
 | Project | o do passo 3 |
-| Playbook | `playbooks/restart_glue_job.yml` |
+| Playbook | `playbooks/glue-playbooks/restart_glue_job.yml` |
 | Execution environment | um com `amazon.aws`, `servicenow.itsm` e `boto3` |
 | Credentials | a da AWS **e** a da ServiceNow |
 | Extra variables | marque **Prompt on launch** |
@@ -148,7 +150,7 @@ Salve e espere o status *Running*.
 
 Para só ver os eventos antes de ligar a automação, crie do mesmo jeito uma activation com o rulebook `glue-eventos-observar.yml` (sem a credencial do passo 7, que ela não usa). Cada evento aparece inteiro na aba *History*; depois de conferir, apague essa activation.
 
-A activation guarda uma cópia do rulebook. Se o rulebook mudar no Git (organização, nome do job template, condição), sincronize o projeto do EDA e crie a activation de novo. Mudança no `vars.yml` não exige nada disso.
+A activation guarda uma cópia do rulebook. Se o rulebook mudar no Git (organização, nome do job template, condição), sincronize o projeto do EDA e crie a activation de novo. Mudança no arquivo de variáveis não exige nada disso.
 
 ## Parte 3: conferir
 
@@ -165,8 +167,8 @@ A activation guarda uma cópia do rulebook. Se o rulebook mudar no Git (organiza
 | Sintoma | Causa provável |
 |---|---|
 | O evento chega (200) e nenhum job aparece | O evento não tem `jobSource` igual a `aws.glue`, ou a organização ou o nome do job template no rulebook não batem com o AAP (veja o log da activation) |
-| Job falha com "O campo ... não traz um número de incidente válido" | Falta o *Prompt on launch* das variáveis no job template, ou o campo do incidente tem outro nome (`evento_campos.incidente` no `vars.yml`) |
+| Job falha com "O campo ... não traz um número de incidente válido" | Falta o *Prompt on launch* das variáveis no job template, ou o campo do incidente tem outro nome (`evento_campos.incidente` no arquivo de variáveis) |
 | Job termina em "Evento ignorado" | O estado do evento não está em `glue_estados_travado` |
 | Nota no incidente: "não foi possível assumir o papel" | O papel não existe na conta do job, ou não confia na identidade da credencial da AWS |
 | Job falha ao falar com a ServiceNow | Credencial da ServiceNow fora do job template, ou injetando variáveis com outros nomes |
-| Módulo `glue_job_run` não encontrado | Veja "Onde ficam os módulos" no `_LEIA-ME.md` |
+| Módulo `glue_job_run` não encontrado | A pasta `library/` não foi junto com o playbook: ela precisa ficar ao lado dele, em `playbooks/glue-playbooks/library/` |
