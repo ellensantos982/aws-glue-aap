@@ -164,6 +164,6 @@ A activation guarda uma cópia do rulebook. Se o rulebook mudar no Git (organiza
 | Job termina em "Evento ignorado" | O estado do evento não está em `glue_estados_travado` |
 | Nota no incidente: "não foi possível assumir o papel" | O papel não existe na conta do job, ou não confia na identidade da credencial da AWS |
 | Job falha em "Conferir o endereço e o token da ServiceNow" | A credencial não está no job template, ou injeta variáveis com outros nomes |
-| Job falha em "Localizar o incidente" | Token sem acesso, certificado não confiável (`sn_validar_certificado`) ou incidente inexistente |
+| Job falha em "Conferir se o incidente foi localizado" | A mensagem traz o código HTTP: 200 com 0 resultado é incidente inexistente; 401 é token sem acesso; sem resposta costuma ser certificado não confiável (`sn_validar_certificado`) |
 | Nota no incidente: "a ação executada ... não está preenchida" | Falta `sn_u_action_to_be_taken` no arquivo de variáveis |
 | Módulo `glue_job_run` não encontrado | A pasta `library/` não foi junto com o playbook: ela precisa ficar ao lado dele, em `playbooks/glue-playbooks/library/` |

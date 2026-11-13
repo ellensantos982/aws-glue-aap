@@ -97,7 +97,19 @@
           incidente_ref }}&sysparm_fields=sys_id,number&sysparm_limit=1
         method: GET
       register: consulta
-      failed_when: consulta.status | default(0) != 200 or consulta.json.result | default([]) | length != 1
+      failed_when: false
+      no_log: true     # a resposta traz os cookies de sessão da ServiceNow; a conferência vem na tarefa seguinte
+
+    - name: Conferir se o incidente foi localizado
+      ansible.builtin.assert:
+        that:
+          - consulta.status | default(0) == 200
+          - consulta.json.result | default([]) | length == 1
+        fail_msg: >-
+          Incidente não localizado na ServiceNow: HTTP {{ consulta.status | default('sem resposta') }},
+          {{ consulta.json.result | default([]) | length }} resultado(s).
+          {{ consulta.msg | default('') | string | truncate(300) }} Nada foi feito.
+        quiet: true
 
     - name: Guardar o incidente
       ansible.builtin.set_fact:
