@@ -173,8 +173,24 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Authorization: errado' -H '
 
 ## Validação feita nesta pasta
 
-Esta versão (evento no formato do incidente, ServiceNow por token e fechamento pelo role) passou pelas checagens que não dependem de ambiente: sintaxe do playbook, leitura do evento com o bloco como objeto e como texto JSON, montagem dos campos gravados no incidente e o rulebook carregado no `ansible-rulebook` (só o incidente com `u_additional_info.jobSource` igual a `aws.glue` dispara). O teste no AAP do laboratório desta versão está em andamento.
+Os arquivos desta pasta rodaram no AAP 2.7 do laboratório, neste desenho, numa branch de teste com os valores de lá (papel de automação, usuário e instância de teste) e com um role de fechamento escrito com as mesmas entradas, validações e chamada do role do repositório de destino.
 
-A versão anterior do mesmo playbook (mesmas etapas de conferência, restart e limite, com a ServiceNow pela coleção `servicenow.itsm`) rodou no AAP 2.7 do laboratório, com Event Stream e activation: restart de um job travado de verdade, recusas, evento repetido, limite de restarts, texto com `{{ }}` no evento e duas activations no mesmo Event Stream.
+- **Pelo Event Stream e pela activation**, com eventos no formato do incidente (`sys_id` na raiz e dados do job em `u_additional_info`):
+  - estado não tratado: evento ignorado, sem tocar no incidente;
+  - incidente de outra origem: nenhum job lançado;
+  - nome de job com `{{ }}`: não foi avaliado e foi recusado, com nota no incidente;
+  - execução que não travou: recusada, com nota no incidente;
+  - execução já reiniciada: incidente fechado como duplicado **pelo role de fechamento**, com o responsável padrão do role.
+- **Fechamento direto pela API** (`sn_role_de_fechamento` vazio), com o job template lançado à mão: incidente fechado como duplicado, com `assigned_to` e `resolved_by`.
+- **Sem depender de ambiente:** sintaxe, leitura do bloco como objeto e como texto JSON, e o rulebook carregado no `ansible-rulebook`.
+
+Não foi conferido nesta versão:
+
+- **O restart completo** (assumir o incidente, reiniciar e resolver). As etapas de AWS são as mesmas da versão anterior, que reiniciou um job travado de verdade no mesmo AAP; o que mudou foi a forma de gravar no incidente.
+- **O role de fechamento verdadeiro**: o teste usou um equivalente, escrito a partir da leitura dele.
+- **Bloco como texto JSON pelo Event Stream:** nesse formato a condição do rulebook não enxerga `jobSource` e a regra não dispara. O playbook lê os dois formatos, mas o rulebook espera o bloco como objeto.
+- Os campos `u_automation_status` e `u_impact_end` e o código `Solved (Permanently)`, que não existem na instância de teste.
+
+A versão anterior do playbook (ServiceNow pela coleção `servicenow.itsm`, campos do evento na raiz) também passou por: limite de restarts, conta sem o papel, região fora da lista, job inexistente, elegibilidade por lista e duas activations no mesmo Event Stream.
 
 O `aap_configurar.sh` foi testado no Git Bash contra um AAP simulado e contra o AAP 2.7 do laboratório.
