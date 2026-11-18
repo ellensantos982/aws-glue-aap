@@ -14,9 +14,14 @@
 
   rules:
     - name: Incidente de job Glue
-      # Os dados do job vêm no bloco u_additional_info do incidente. Se a origem não vier em
-      # jobSource, troque a condição (por exemplo, pelo número do KB do incidente).
-      condition: event.payload.u_additional_info.jobSource == "aws.glue"
+      # O incidente de job Glue é reconhecido pelo tipo do alerta, no bloco u_additional_info:
+      # troque AJUSTAR-tipo-do-alerta pelo valor que os incidentes de job Glue trazem em alert_type.
+      # Só o incidente novo (state 1) dispara: uma atualização do mesmo incidente não lança outro job.
+      # Para restringir a um procedimento, acrescente o número do KB:
+      #   and event.payload.u_additional_info.kb_number == "AJUSTAR-kb"
+      condition: >-
+        event.payload.u_additional_info.alert_type == "AJUSTAR-tipo-do-alerta"
+        and event.payload.state == "1"
       action:
         run_job_template:
           organization: "AJUSTAR-organizacao"       # organização do job template no AAP

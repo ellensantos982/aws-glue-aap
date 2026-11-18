@@ -98,11 +98,10 @@ Lance o job template à mão (*Launch template*) com estas variáveis:
 ```yaml
 evento:
   u_additional_info:
-    jobSource: aws.glue
-    jobState: FAILED
+    alert_type: AJUSTAR-tipo-do-alerta
 ```
 
-O job deve terminar com sucesso em segundos, com a mensagem "Evento ignorado: estado FAILED". Isso prova que projeto, execution environment e variáveis estão certos, sem tocar na AWS nem na ServiceNow.
+O job deve parar em segundos na tarefa "Conferir a referência do incidente", com a mensagem "O campo "sys_id" do evento não traz um sys_id válido: nada foi feito". É uma falha esperada: ela prova que projeto, execution environment e variáveis estão certos, sem tocar na AWS nem na ServiceNow.
 
 ## Parte 2: Automation Decisions
 
@@ -150,18 +149,19 @@ A activation guarda uma cópia do rulebook. Se o rulebook mudar no Git (organiza
 1. **Activation:** em *Rulebook Activations*, abra a activation; a aba *History* mostra o log.
 2. **Evento de teste:** peça um evento de teste ao emissor, ou envie um pelo Git Bash se tiver o token do Event Stream:
    ```bash
-   curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Authorization: Bearer TOKEN' -H 'Content-Type: application/json' -d '{"u_additional_info": {"jobSource": "aws.glue", "jobState": "FAILED"}}' 'URL-DO-EVENT-STREAM'
+   curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Authorization: Bearer TOKEN' -H 'Content-Type: application/json' -d '{"state": "1", "u_additional_info": {"alert_type": "AJUSTAR-tipo-do-alerta"}}' 'URL-DO-EVENT-STREAM'
    ```
-   O esperado é `200`, e em seguida um job novo em *Automation Execution → Jobs*, terminando com "Evento ignorado". Com token errado, o esperado é `403`.
+   Use em `alert_type` o mesmo valor da condição do rulebook. O esperado é `200`, e em seguida um job novo em *Automation Execution → Jobs*, parando em "Conferir a referência do incidente" (o evento de teste não traz incidente). Com token errado, o esperado é `403`.
 3. **Regra disparada:** *Automation Decisions → Rule Audit* lista cada disparo e o job lançado.
 
 ## Se algo não funcionar
 
 | Sintoma | Causa provável |
 |---|---|
-| O evento chega (200) e nenhum job aparece | O evento não tem `u_additional_info.jobSource` igual a `aws.glue`, ou a organização ou o nome do job template no rulebook não batem com o AAP (veja o log da activation) |
+| O evento chega (200) e nenhum job aparece | O evento não tem `u_additional_info.alert_type` igual ao valor da condição do rulebook e `state` igual a `1`, ou a organização ou o nome do job template no rulebook não batem com o AAP (veja o log da activation) |
 | Job falha com "O campo ... não traz um sys_id válido" | Falta o *Prompt on launch* das variáveis no job template, ou o campo do incidente tem outro nome (`evento_campos.incidente` no arquivo de variáveis) |
-| Job termina em "Evento ignorado" | O estado do evento não está em `glue_estados_travado` |
+| Nota no incidente: "a execução ... está em ..., e não em ..." | O estado da execução no Glue não está em `glue_estados_travado` |
+| Nota no incidente: "o evento não traz um ID de execução válido" | A descrição do incidente não tem a linha `jobrunid: jr_...` (ajuste `evento_execucao_texto_padrao`) |
 | Nota no incidente: "não foi possível assumir o papel" | O papel não existe na conta do job, ou não confia na identidade da credencial da AWS |
 | Job falha em "Conferir o endereço e o token da ServiceNow" | A credencial não está no job template, ou injeta variáveis com outros nomes |
 | Job falha em "Conferir se o incidente foi localizado" | A mensagem traz o código HTTP: 200 com 0 resultado é incidente inexistente; 401 é token sem acesso; sem resposta costuma ser certificado não confiável (`sn_validar_certificado`) |

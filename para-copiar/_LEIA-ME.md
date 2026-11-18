@@ -22,14 +22,15 @@ Por que cada coisa está onde está:
 
 O evento é o incidente que a ServiceNow envia ao Event Stream do AAP. O identificador do incidente (`sys_id`) vem na raiz do evento, e os dados do job vêm num bloco dentro dele (`u_additional_info`).
 
-O rulebook só confere que o incidente é de um job Glue (`u_additional_info.jobSource` igual a `aws.glue`) e entrega o evento inteiro ao job template, na variável `evento`. Todo o resto é decidido pelo playbook, a partir do arquivo de variáveis, `playbooks/glue-playbooks/vars/restart_glue_job.yml`:
+O rulebook só confere que o incidente é de um job Glue (`u_additional_info.alert_type` igual ao tipo de alerta dos jobs Glue, preenchido na condição do rulebook) e que ele é novo (`state` igual a `1`), e entrega o evento inteiro ao job template, na variável `evento`. Todo o resto é decidido pelo playbook, a partir do arquivo de variáveis, `playbooks/glue-playbooks/vars/restart_glue_job.yml`:
 
 | No arquivo de variáveis | O que define | Valor inicial |
 |---|---|---|
 | `evento_bloco_do_job` | Em qual bloco do evento ficam os dados do job; vazio = na raiz | `u_additional_info` |
-| `evento_campos` | Em qual campo vem cada dado: incidente (na raiz), conta, região, job, execução e estado (no bloco) | `sys_id`, `account`, `region`, `jobName`, `jobRunId`, `jobState` |
+| `evento_campos` | Em qual campo vem cada dado: incidente (na raiz), conta, região, job, execução e estado (no bloco) | `sys_id`, `account_id`, `region`, `jobname`, `jobrunid`, sem campo de estado |
+| `evento_execucao_texto_campo`, `evento_execucao_texto_padrao` | Onde procurar o ID da execução quando ele não vem como campo do bloco: um campo de texto da raiz e a expressão regular | `description`, linha `jobrunid: jr_...` |
 | `evento_incidente_tipo` | Se o campo do incidente traz o `sys_id` ou o número | `sys_id` |
-| `glue_estados_travado` | Estados que a automação trata | `TIMEOUT` |
+| `glue_estados_travado` | Estados que a automação trata | `TIMEOUT`, `FAILED`, `ERROR` |
 | `aws_papel_automacao`, `aws_external_id` | Papel assumido na conta do job | `AJUSTAR` |
 | `aws_regioes_permitidas` | Regiões aceitas; vazio aceita qualquer uma | vazio |
 | `job_elegibilidade` | Quais jobs podem ser reiniciados: `tag`, `lista` ou `todos` | `tag` (`auto-remediacao=sim`) |
@@ -38,9 +39,9 @@ Se um dado vier em outro campo, basta trocar o nome em `evento_campos` e dar pus
 
 **Não há catálogo de contas.** A conta e a região vêm do evento, e o playbook assume o papel `aws_papel_automacao` na conta que vier. O que limita onde a automação age passa a ser: o papel existir na conta e confiar na identidade do AAP, a tag (ou lista) do job e, se preenchida, a lista de regiões. Conta sem o papel recebe a nota "não foi possível assumir o papel" e nada é feito.
 
-Evento com estado fora de `glue_estados_travado` termina sem tocar no incidente. Nos demais casos de recusa (dado ausente ou fora do padrão, job sem a tag, execução que não travou), o motivo fica anotado no incidente. O ID da execução pode vir com o sufixo de nova tentativa (`jr_..._attempt_1`).
+O incidente não traz o estado da execução: o playbook consulta a execução no Glue e só reinicia se ela estiver num dos estados de `glue_estados_travado`. O ID da execução também não vem como campo: ele é lido da descrição do incidente (linha `jobrunid: jr_...`). Nos casos de recusa (dado ausente ou fora do padrão, job sem a tag, execução em outro estado), o motivo fica anotado no incidente. O ID da execução pode vir com o sufixo de nova tentativa (`jr_..._attempt_1`).
 
-Cada incidente de job Glue que chegar vira um job curto no AAP, mesmo os ignorados. Se o volume incomodar, acrescente o estado à condição do rulebook.
+Cada incidente novo de job Glue que chegar vira um job no AAP. Uma atualização do mesmo incidente (por exemplo, a que o próprio playbook faz ao assumi-lo) não lança outro job, porque a condição exige `state` igual a `1`.
 
 ### Usar um Event Stream que já recebe os eventos
 
@@ -53,8 +54,8 @@ Dois cuidados:
 
 ### Pontos em aberto
 
-1. **Confirmar o formato com um evento real.** A leitura acima (dados do job dentro de `u_additional_info`, com `jobSource`, `jobState`, `account`, `region`, `jobName` e `jobRunId`) junta o exemplo de dados recebido com o que o rulebook já existente lê do incidente. A activation de leitura mostra o evento inteiro e tira a dúvida.
-2. **Quais estados entram no restart.** O exemplo recebido é de um job em `FAILED` por erro de instalação de módulo; reiniciar não resolve esse tipo de erro. A pasta sai aceitando só `TIMEOUT`; a lista fica em `glue_estados_travado`.
+1. **Formato do evento: conferido com um incidente real.** Os dados do job vêm em `u_additional_info` (`alert_type`, `account_id`, `region`, `jobname`), sem campo de estado, e o ID da execução vem só no texto da descrição. Falta conferir se todo alerta de Glue traz a linha `jobrunid:` na descrição; sem ela o playbook recusa o incidente com uma nota.
+2. **Quais estados entram no restart.** O alerta recebido é de falha de execução. A pasta sai aceitando `TIMEOUT`, `FAILED` e `ERROR`; a lista fica em `glue_estados_travado`. Falha por erro de código ou de dado se repete no restart: o limite de `max_restarts` segura a repetição e o incidente fica aberto com a nota.
 3. **O identificador da ação executada** (`sn_u_action_to_be_taken`). O role de fechamento exige esse valor, que é cadastrado na ServiceNow para cada automação. Sem ele o playbook recusa o evento antes de reiniciar o job.
 4. **O nome do papel de automação** (`aws_papel_automacao`): o mesmo papel que os outros playbooks de AWS do repositório assumem, se ele alcançar o Glue.
 5. **De onde vêm o endereço e o token da ServiceNow** no job template: uma credencial que injete as variáveis de ambiente, ou as variáveis `instance_url` e `sn_access_token`.
@@ -188,7 +189,7 @@ Não foi conferido nesta versão:
 
 - **O restart completo** (assumir o incidente, reiniciar e resolver). As etapas de AWS são as mesmas da versão anterior, que reiniciou um job travado de verdade no mesmo AAP; o que mudou foi a forma de gravar no incidente.
 - **O role de fechamento verdadeiro**: o teste usou um equivalente, escrito a partir da leitura dele.
-- **Bloco como texto JSON pelo Event Stream:** nesse formato a condição do rulebook não enxerga `jobSource` e a regra não dispara. O playbook lê os dois formatos, mas o rulebook espera o bloco como objeto.
+- **Bloco como texto JSON pelo Event Stream:** nesse formato a condição do rulebook não enxerga `alert_type` e a regra não dispara. O playbook lê os dois formatos, mas o rulebook espera o bloco como objeto.
 - Os campos `u_automation_status` e `u_impact_end` e o código `Solved (Permanently)`, que não existem na instância de teste.
 
 A versão anterior do playbook (ServiceNow pela coleção `servicenow.itsm`, campos do evento na raiz) também passou por: limite de restarts, conta sem o papel, região fora da lista, job inexistente, elegibilidade por lista e duas activations no mesmo Event Stream.

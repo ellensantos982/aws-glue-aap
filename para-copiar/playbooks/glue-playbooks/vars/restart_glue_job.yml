@@ -8,17 +8,22 @@
 evento_bloco_do_job: u_additional_info   # vazio = os dados do job também ficam na raiz do evento
 evento_campos:
   incidente: sys_id        # na raiz do evento
-  conta: account           # daqui para baixo, dentro do bloco
+  conta: account_id        # daqui para baixo, dentro do bloco
   regiao: region
-  job: jobName
-  execucao: jobRunId
-  estado: jobState
+  job: jobname
+  execucao: jobrunid       # hoje não vem no bloco: vale a busca no texto, logo abaixo
+  estado: ""               # o evento não traz o estado: quem decide é a consulta ao Glue
 # O que o campo do incidente traz: sys_id (32 caracteres hexadecimais) ou numero (ex.: INC0012345)
 evento_incidente_tipo: sys_id
 
-# Estados que a automação trata. Evento com outro estado termina sem tocar no incidente.
-# A execução também é conferida no Glue: só é reiniciada se estiver mesmo num destes estados.
-glue_estados_travado: [TIMEOUT]
+# Quando o ID da execução não vem como campo do bloco, ele é procurado num campo de texto da raiz
+# do evento. O padrão é uma expressão regular com o ID entre parênteses.
+evento_execucao_texto_campo: description
+evento_execucao_texto_padrao: '(?i)jobrunid:\s*(jr_[A-Za-z0-9_]+)'
+
+# Estados que a automação trata. A execução é conferida no Glue: só é reiniciada se estiver mesmo
+# num destes estados. Se o evento trouxer o estado, outro valor termina sem tocar no incidente.
+glue_estados_travado: [TIMEOUT, FAILED, ERROR]
 
 # ---------- AWS ----------
 # A conta e a região vêm do evento. O Ansible assume este papel na conta do job: ele precisa
